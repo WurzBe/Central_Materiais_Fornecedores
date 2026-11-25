@@ -35,6 +35,15 @@ def init():
           id INTEGER PRIMARY KEY, processo TEXT, data_cotacao TEXT, objeto TEXT,
           status TEXT, observacoes TEXT
         );
+        CREATE TABLE IF NOT EXISTS cotacao_itens (
+          id INTEGER PRIMARY KEY, cotacao_id INTEGER NOT NULL,
+          material_id INTEGER NOT NULL, fornecedor_id INTEGER NOT NULL,
+          quantidade REAL DEFAULT 1, unidade TEXT DEFAULT 'un',
+          preco_unitario REAL NOT NULL, prazo_entrega TEXT, observacoes TEXT,
+          FOREIGN KEY(cotacao_id) REFERENCES cotacoes(id),
+          FOREIGN KEY(material_id) REFERENCES materiais(id),
+          FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
+        );
         """)
 
 def read(sql, params=()):
@@ -53,6 +62,9 @@ def apenas_digitos(texto):
 
 def idx_opcao(opcoes, valor):
     return opcoes.index(valor) if valor in opcoes else 0
+
+def fmt_brl(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 CATEGORIAS = ["", "Tubos", "Conexões", "Válvulas", "Atuadores", "Medidores", "Bombas", "Materiais elétricos", "Instrumentação", "Outros"]
 MATERIAIS_FAB = ["", "Ferro fundido dúctil", "Aço carbono", "Aço inoxidável", "PVC", "PEAD", "Bronze", "Outro"]
@@ -101,11 +113,30 @@ if page == "Pesquisa":
             y.write(f"**Aplicação:** {m.aplicacao or 'Não informado'}")
             y.write(f"**Status:** {m.status}")
             st.write(m.descricao_tecnica or "")
-            rel = read("""SELECT f.razao_social, r.tipo_relacao, r.fabricante_ofertado, r.modelo_ofertado, r.data_interacao
-                         FROM fornecimentos r JOIN fornecedores f ON f.id=r.fornecedor_id
-                         WHERE r.material_id=? ORDER BY r.data_interacao DESC""", (int(m.id),))
+
+            rel = read("""SELECT f.razao_social AS Fornecedor, r.tipo_relacao AS Relação,
+                                 r.fabricante_ofertado AS Fabricante, r.modelo_ofertado AS Modelo,
+                                 r.data_interacao AS Data
+                          FROM fornecimentos r JOIN fornecedores f ON f.id=r.fornecedor_id
+                          WHERE r.material_id=? ORDER BY r.data_interacao DESC""", (int(m.id),))
             st.markdown("**Fornecedores relacionados**")
             st.dataframe(rel, use_container_width=True, hide_index=True) if not rel.empty else st.caption("Sem fornecedores relacionados.")
+
+            hist_cot = read("""SELECT c.data_cotacao AS Data, c.processo AS Processo,
+                                      f.razao_social AS Fornecedor, ci.quantidade AS Qtd,
+                                      ci.unidade AS Unid, ci.preco_unitario AS Preço_Unit,
+                                      ci.prazo_entrega AS Prazo, ci.observacoes AS Obs
+                               FROM cotacao_itens ci
+                               JOIN cotacoes c ON c.id = ci.cotacao_id
+                               JOIN fornecedores f ON f.id = ci.fornecedor_id
+                               WHERE ci.material_id=?
+                               ORDER BY c.data_cotacao DESC, ci.preco_unitario ASC""", (int(m.id),))
+            st.markdown("**Histórico de cotações e preços**")
+            if not hist_cot.empty:
+                hist_cot["Preço_Unit"] = hist_cot["Preço_Unit"].apply(fmt_brl)
+                st.dataframe(hist_cot, use_container_width=True, hide_index=True)
+            else:
+                st.caption("Sem cotações registradas para este material.")
 
 elif page == "Cadastrar material":
     st.header("Materiais")
@@ -237,13 +268,15 @@ elif page == "Cadastrar material":
             st.divider()
             st.subheader("Excluir material")
             qtd_rel = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
-            if qtd_rel > 0:
-                st.warning(f"Este material possui {qtd_rel} vínculo(s) na aba 'Relacionar fornecedor'.")
-            confirmar_del_mat = st.checkbox("Confirmo que desejo excluir permanentemente este material (e seus vínculos, se houver)", key=f"del_mat_{mid_edit}")
+            qtd_cot = read("SELECT COUNT(*) AS total FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
+            if qtd_rel > 0 or qtd_cot > 0:
+                st.warning(f"Este material possui {qtd_rel} vínculo(s) com fornecedores e {qtd_cot} item(ns) em cotações.")
+            confirmar_del_mat = st.checkbox("Confirmo que desejo excluir permanentemente este material (e seus vínculos/itens de cotação, se houver)", key=f"del_mat_{mid_edit}")
             if st.button("Excluir material selecionado", type="primary"):
                 if not confirmar_del_mat:
                     st.error("Marque a caixa de confirmação antes de excluir.")
                 else:
+                    write("DELETE FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))
                     write("DELETE FROM fornecimentos WHERE material_id=?", (int(mid_edit),))
                     write("DELETE FROM materiais WHERE id=?", (int(mid_edit),))
                     st.success("Material excluído.")
@@ -300,99 +333,4 @@ elif page == "Fornecedores":
             fid_edit = st.selectbox(
                 "Selecione o fornecedor pelo ID para editar ou excluir",
                 forns["id"].tolist(),
-                format_func=lambda i: f"ID {i} — {forns.loc[forns.id==i, 'razao_social'].iloc[0]} ({forns.loc[forns.id==i, 'cnpj'].iloc[0] or 'Sem CNPJ'})"
-            )
-            f_item = forns[forns["id"] == fid_edit].iloc[0]
-
-            with st.form("form_editar_fornecedor"):
-                e_razao = st.text_input("Razão social *", value=f_item["razao_social"] or "")
-                e_fantasia = st.text_input("Nome fantasia", value=f_item["nome_fantasia"] or "")
-                e_cnpj = st.text_input("CNPJ", value=f_item["cnpj"] or "")
-                e_contato = st.text_input("Contato comercial", value=f_item["contato"] or "")
-                e_email = st.text_input("E-mail", value=f_item["email"] or "")
-                e_telefone = st.text_input("Telefone", value=f_item["telefone"] or "")
-                e_site = st.text_input("Site", value=f_item["site"] or "")
-                e_obs = st.text_area("Observações", value=f_item["observacoes"] or "")
-                salvar_f = st.form_submit_button("Salvar alterações")
-
-            if salvar_f:
-                if not e_razao.strip():
-                    st.error("Razão social é obrigatória.")
-                else:
-                    outros_f = forns[forns["id"] != fid_edit]
-                    razao_n = norm(e_razao)
-                    cnpj_d = apenas_digitos(e_cnpj)
-                    dup_f = outros_f[
-                        outros_f.apply(
-                            lambda r: norm(r["razao_social"]) == razao_n
-                            or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d),
-                            axis=1,
-                        )
-                    ] if not outros_f.empty else pd.DataFrame()
-
-                    if not dup_f.empty:
-                        st.error("Já existe outro fornecedor com esta Razão Social ou CNPJ.")
-                    else:
-                        write("""UPDATE fornecedores SET
-                            razao_social=?, nome_fantasia=?, cnpj=?, contato=?, email=?, telefone=?, site=?, observacoes=?
-                            WHERE id=?""",
-                            (e_razao.strip(), e_fantasia.strip(), e_cnpj.strip(), e_contato.strip(), e_email.strip(),
-                             e_telefone.strip(), e_site.strip(), e_obs.strip(), int(fid_edit)))
-                        st.success("Fornecedor atualizado com sucesso.")
-                        st.rerun()
-
-            st.divider()
-            st.subheader("Excluir fornecedor")
-            qtd_rel_f = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))["total"].iloc[0]
-            if qtd_rel_f > 0:
-                st.warning(f"Este fornecedor possui {qtd_rel_f} vínculo(s) na aba 'Relacionar fornecedor'.")
-            confirmar_del_forn = st.checkbox("Confirmo que desejo excluir permanentemente este fornecedor (e seus vínculos, se houver)", key=f"del_forn_{fid_edit}")
-            if st.button("Excluir fornecedor selecionado", type="primary"):
-                if not confirmar_del_forn:
-                    st.error("Marque a caixa de confirmação antes de excluir.")
-                else:
-                    write("DELETE FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))
-                    write("DELETE FROM fornecedores WHERE id=?", (int(fid_edit),))
-                    st.success("Fornecedor excluído.")
-                    st.rerun()
-
-elif page == "Relacionar fornecedor":
-    st.header("Relacionar fornecedor e material")
-    ms = read("SELECT id,descricao,dn FROM materiais ORDER BY descricao")
-    fs = read("SELECT id,razao_social FROM fornecedores ORDER BY razao_social")
-    if ms.empty or fs.empty:
-        st.info("Cadastre ao menos um material e um fornecedor primeiro.")
-    else:
-        with st.form("rel"):
-            mid = st.selectbox("Material", ms.id.tolist(), format_func=lambda i: f"{ms.loc[ms.id==i,'descricao'].iloc[0]} (DN {ms.loc[ms.id==i,'dn'].iloc[0] or '—'})")
-            fid = st.selectbox("Fornecedor", fs.id.tolist(), format_func=lambda i: fs.loc[fs.id==i,"razao_social"].iloc[0])
-            tipo = st.selectbox("Tipo de relação", ["Forneceu", "Cotou", "Forneceu similar"])
-            fabricante = st.text_input("Fabricante ofertado")
-            modelo = st.text_input("Modelo ofertado")
-            data = st.date_input("Data da interação")
-            obs = st.text_area("Observações")
-            ok = st.form_submit_button("Salvar relação")
-        if ok:
-            write("INSERT INTO fornecimentos(material_id,fornecedor_id,tipo_relacao,fabricante_ofertado,modelo_ofertado,data_interacao,observacoes) VALUES(?,?,?,?,?,?,?)",(mid,fid,tipo,fabricante,modelo,str(data),obs))
-            st.success("Relação cadastrada.")
-
-elif page == "Cotações":
-    st.header("Cadastro de cotações")
-    with st.form("cot"):
-        processo = st.text_input("Número do processo")
-        data = st.date_input("Data")
-        objeto = st.text_input("Objeto")
-        status = st.selectbox("Status", ["Em andamento", "Concluída", "Cancelada"])
-        obs = st.text_area("Observações")
-        ok = st.form_submit_button("Criar cotação")
-    if ok:
-        write("INSERT INTO cotacoes(processo,data_cotacao,objeto,status,observacoes) VALUES(?,?,?,?,?)",(processo,str(data),objeto,status,obs))
-        st.success("Cotação criada.")
-    st.dataframe(read("SELECT * FROM cotacoes ORDER BY data_cotacao DESC"), use_container_width=True, hide_index=True)
-
-else:
-    st.header("Exportar dados")
-    st.write("Exporte cópias CSV das tabelas. Para backup integral, copie o arquivo central.db com o aplicativo fechado.")
-    for table in ["materiais","fornecedores","fornecimentos","cotacoes"]:
-        data = read(f"SELECT * FROM {table}")
-        st.download_button(f"Baixar {table}.csv", data.to_csv(index=False).encode("utf-8-sig"), f"{table}.csv", "text/csv")
+                format_func=lambda i: f"ID {i} — {forns.loc[forns.id==i, 'razao_social'].iloc[0]} ({forns.loc[forns.id
