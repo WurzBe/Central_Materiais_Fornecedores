@@ -518,7 +518,9 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
         if pd.notna(row_h.iloc[col_idx]) and str(row_h.iloc[col_idx]).strip():
             return False
         if pd.notna(row_sub.iloc[col_idx]) and str(row_sub.iloc[col_idx]).strip():
-            return False
+            sub_nome = norm(row_sub.iloc[col_idx])
+            if not any(k in sub_nome for k in ("nome", "fornecedor", "empresa", "razão", "razao")):
+                return False
         vals_col = [v for v in amostra_bloco.iloc[:, col_idx].tolist() if pd.notna(v) and str(v).strip()]
         if not vals_col:
             return False
@@ -1792,3 +1794,4 @@ else:
             st.info("**Banco na nuvem ativo:** os dados estão salvos no PostgreSQL e os anexos no Storage.")
         else:
             st.info("**Backup completo local:** copie o arquivo `central.db` e a pasta `anexos/` da pasta do projeto.")
+            
