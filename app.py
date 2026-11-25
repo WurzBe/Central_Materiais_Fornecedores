@@ -1,5 +1,6 @@
 import re
 import sqlite3
+import tempfile
 import uuid
 from datetime import date
 from pathlib import Path
@@ -74,11 +75,15 @@ def write(sql, params=()):
 
 
 def norm(texto):
-    return " ".join((str(texto) if texto is not None else "").strip().lower().split())
+    if texto is None or (isinstance(texto, float) and pd.isna(texto)):
+        return ""
+    return " ".join(str(texto).strip().lower().split())
 
 
 def apenas_digitos(texto):
-    return "".join(ch for ch in (texto or "") if ch.isdigit())
+    if texto is None or (isinstance(texto, float) and pd.isna(texto)):
+        return ""
+    return "".join(ch for ch in str(texto) if ch.isdigit())
 
 
 def idx_opcao(opcoes, valor):
@@ -111,6 +116,74 @@ def achar_coluna_padrao(colunas, palavras_chave):
         if any(p in c_norm for p in palavras_chave):
             return idx
     return 0
+
+
+def carregar_fonte_tabular(arquivo_upload):
+    nome = arquivo_upload.name.lower()
+    ext = Path(nome).suffix
+
+    if ext in (".csv", ".tsv", ".txt"):
+        sep_padrao = "\t" if ext == ".tsv" else None
+        for enc in ("utf-8-sig", "utf-8", "latin1"):
+            try:
+                arquivo_upload.seek(0)
+                if sep_padrao:
+                    df = pd.read_csv(arquivo_upload, header=None, sep=sep_padrao, encoding=enc)
+                else:
+                    df = pd.read_csv(arquivo_upload, header=None, sep=None, engine="python", encoding=enc)
+                return df, None
+            except Exception:
+                continue
+        arquivo_upload.seek(0)
+        return pd.read_csv(arquivo_upload, header=None, sep=";", encoding="latin1"), None
+
+    if ext in (".db", ".sqlite", ".sqlite3"):
+        arquivo_upload.seek(0)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(arquivo_upload.read())
+            tmp_path = tmp.name
+        try:
+            with sqlite3.connect(tmp_path) as conn_ext:
+                tabelas = pd.read_sql_query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                    conn_ext
+                )["name"].tolist()
+                if not tabelas:
+                    raise ValueError("O arquivo de banco de dados não possui tabelas.")
+                tabela_sel = tabelas[0]
+                if len(tabelas) > 1:
+                    tabela_sel = st.selectbox("Selecione a tabela do banco de dados", tabelas)
+                df_tab = pd.read_sql_query(f'SELECT * FROM "{tabela_sel}"', conn_ext)
+                header_df = pd.DataFrame([list(df_tab.columns)], columns=range(len(df_tab.columns)))
+                body_df = pd.DataFrame(df_tab.values, columns=range(len(df_tab.columns)))
+                return pd.concat([header_df, body_df], ignore_index=True), tabela_sel
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+    engine = None
+    if ext == ".xlsb":
+        engine = "pyxlsb"
+    elif ext == ".ods":
+        engine = "odf"
+    elif ext in (".xlsx", ".xlsm"):
+        engine = "openpyxl"
+    elif ext == ".xls":
+        engine = "xlrd"
+
+    try:
+        arquivo_upload.seek(0)
+        excel_file = pd.ExcelFile(arquivo_upload, engine=engine) if engine else pd.ExcelFile(arquivo_upload)
+    except ImportError as imp_err:
+        raise ImportError(
+            f"Biblioteca necessária para arquivos '{ext}' não está instalada ({imp_err}). "
+            f"Rode no terminal: pip install pyxlsb odfpy openpyxl xlrd"
+        ) from imp_err
+
+    aba_escolhida = excel_file.sheet_names[0]
+    if len(excel_file.sheet_names) > 1:
+        aba_escolhida = st.selectbox("Selecione a aba da planilha", excel_file.sheet_names)
+    df_bruto = pd.read_excel(excel_file, sheet_name=aba_escolhida, header=None)
+    return df_bruto, aba_escolhida
 
 
 def extrair_specs_descricao(descricao):
@@ -240,11 +313,11 @@ def obter_ou_criar_material(descricao, codigo="", dn="", pn="", material_fab="",
     existentes = read("SELECT id, codigo, descricao, dn FROM materiais")
     if not existentes.empty:
         if cod_limpo:
-            match_cod = existentes[existentes["codigo"].fillna("").apply(lambda x: norm(x) == norm(cod_limpo))]
+            match_cod = existentes[existentes["codigo"].apply(lambda x: bool(norm(x) != "" and norm(x) == norm(cod_limpo)))]
             if not match_cod.empty:
                 return int(match_cod.iloc[0]["id"]), False
         match_desc = existentes[
-            existentes.apply(lambda r: norm(r["descricao"]) == norm(desc_limpa) and norm(r["dn"]) == norm(dn_limpo), axis=1)
+            existentes.apply(lambda r: bool(norm(r["descricao"]) == norm(desc_limpa) and norm(r["dn"]) == norm(dn_limpo)), axis=1)
         ]
         if not match_desc.empty:
             return int(match_desc.iloc[0]["id"]), False
@@ -268,8 +341,10 @@ def obter_ou_criar_fornecedor(nome_fornecedor):
     if not existentes.empty:
         match = existentes[
             existentes.apply(
-                lambda r: norm(r["razao_social"]) == norm(nome_limpo)
-                or (r["nome_fantasia"] and norm(r["nome_fantasia"]) == norm(nome_limpo)),
+                lambda r: bool(
+                    norm(r["razao_social"]) == norm(nome_limpo)
+                    or (norm(r["nome_fantasia"]) != "" and norm(r["nome_fantasia"]) == norm(nome_limpo))
+                ),
                 axis=1
             )
         ]
@@ -331,7 +406,8 @@ ACIONAMENTOS = ["", "Manual", "Elétrico", "Pneumático", "Hidráulico", "Sem ac
 APLICACOES = ["", "Água potável", "Esgoto", "Drenagem", "Industrial", "Outra"]
 STATUS_MAT = ["Em revisão", "Validado", "Inativo"]
 TIPOS_DOC = ["Proposta comercial / Orçamento", "Ficha técnica", "Catálogo", "Desenho técnico", "Certificado / Norma", "Outro"]
-EXTENSOES_ACEITAS = ["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc", "csv", "txt"]
+EXTENSOES_PLANILHAS = ["xlsx", "xlsb", "xlsm", "xls", "ods", "csv", "tsv", "db", "sqlite", "sqlite3"]
+EXTENSOES_ACEITAS = ["pdf", "png", "jpg", "jpeg", "xlsx", "xlsb", "xlsm", "xls", "ods", "docx", "doc", "csv", "tsv", "txt", "db", "sqlite", "sqlite3"]
 
 st.set_page_config(page_title="Central de Materiais e Fornecedores", page_icon="🧰", layout="wide")
 init()
@@ -419,7 +495,10 @@ if menu == "🔍 Pesquisa & Catálogo":
                        WHERE r.material_id=? ORDER BY r.data_interacao DESC""",
                     (int(m.id),)
                 )
-                st.dataframe(rel, use_container_width=True, hide_index=True) if not rel.empty else st.caption("Sem fornecedores relacionados.")
+                if not rel.empty:
+                    st.dataframe(rel, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("Sem fornecedores relacionados.")
 
             with t_prec:
                 hist_cot = read(
@@ -516,8 +595,8 @@ elif menu == "📦 Materiais & Fornecedores":
                 else:
                     existentes = read("SELECT id, codigo, descricao, fabricante, modelo, dn, pn, status FROM materiais")
                     desc_n, fab_n, mod_n, dn_n = norm(descricao), norm(fab), norm(modelo), norm(dn)
-                    duplicados_exatos = existentes[existentes.apply(lambda r: norm(r["descricao"]) == desc_n and norm(r["fabricante"]) == fab_n and norm(r["modelo"]) == mod_n and norm(r["dn"]) == dn_n, axis=1)] if not existentes.empty else pd.DataFrame()
-                    mesma_descricao = existentes[existentes.apply(lambda r: norm(r["descricao"]) == desc_n, axis=1)] if not existentes.empty else pd.DataFrame()
+                    duplicados_exatos = existentes[existentes.apply(lambda r: bool(norm(r["descricao"]) == desc_n and norm(r["fabricante"]) == fab_n and norm(r["modelo"]) == mod_n and norm(r["dn"]) == dn_n), axis=1)] if not existentes.empty else pd.DataFrame()
+                    mesma_descricao = existentes[existentes.apply(lambda r: bool(norm(r["descricao"]) == desc_n), axis=1)] if not existentes.empty else pd.DataFrame()
 
                     if not duplicados_exatos.empty:
                         st.error("Este material já está cadastrado com os mesmos dados:")
@@ -619,7 +698,7 @@ elif menu == "📦 Materiais & Fornecedores":
                     f_exist = read("SELECT id, razao_social, nome_fantasia, cnpj FROM fornecedores")
                     razao_n, cnpj_d = norm(razao), apenas_digitos(cnpj)
                     dup_f = f_exist[
-                        f_exist.apply(lambda r: norm(r["razao_social"]) == razao_n or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d), axis=1)
+                        f_exist.apply(lambda r: bool(norm(r["razao_social"]) == razao_n or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d)), axis=1)
                     ] if not f_exist.empty else pd.DataFrame()
                     if not dup_f.empty:
                         st.error("Já existe fornecedor com esta Razão Social ou CNPJ:")
@@ -660,7 +739,7 @@ elif menu == "📦 Materiais & Fornecedores":
                         outros_f = forns[forns["id"] != fid_edit]
                         razao_n, cnpj_d = norm(e_razao), apenas_digitos(e_cnpj)
                         dup_f = outros_f[
-                            outros_f.apply(lambda r: norm(r["razao_social"]) == razao_n or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d), axis=1)
+                            outros_f.apply(lambda r: bool(norm(r["razao_social"]) == razao_n or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d)), axis=1)
                         ] if not outros_f.empty else pd.DataFrame()
                         if not dup_f.empty:
                             st.error("Já existe outro fornecedor com esta Razão Social ou CNPJ.")
@@ -723,33 +802,25 @@ elif menu == "💰 Cotações & Preços":
         st.success(st.session_state.pop("msg_import"))
 
     aba_import, aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
-        "📥 Importar Planilha Pronta",
+        "📥 Importar Planilha ou Banco",
         "📋 Cadastrar cotação manual",
         "💲 Itens e preços",
         "✏️ Editar ou excluir"
     ])
 
     with aba_import:
-        st.subheader("Importar orçamento pronto (Excel ou CSV)")
-        st.write("Envie sua planilha de orçamento ou **Tabela de Cotações**. O sistema **arquiva o arquivo original** e **cadastra automaticamente todos os materiais, fornecedores e preços**.")
+        st.subheader("Importar orçamento pronto (Planilhas ou Banco de Dados)")
+        st.write("Suporta **`.xlsx`, `.xlsb`, `.xlsm`, `.xls`, `.ods`, `.csv`, `.tsv`** e bancos **`.db` / `.sqlite`**. O sistema **arquiva o arquivo original** e **cadastra automaticamente materiais, fornecedores e preços**.")
 
-        arq_planilha = st.file_uploader("Selecione a planilha de orçamento (.xlsx, .xls ou .csv)", type=["xlsx", "xls", "csv"], key="up_planilha_pronta")
+        arq_planilha = st.file_uploader(
+            "Selecione o arquivo (.xlsx, .xlsb, .xlsm, .xls, .ods, .csv, .tsv, .db, .sqlite)",
+            type=EXTENSOES_PLANILHAS,
+            key="up_planilha_pronta"
+        )
 
         if arq_planilha is not None:
             try:
-                if arq_planilha.name.lower().endswith(".csv"):
-                    try:
-                        df_bruto = pd.read_csv(arq_planilha, header=None, sep=None, engine="python")
-                    except Exception:
-                        arq_planilha.seek(0)
-                        df_bruto = pd.read_csv(arq_planilha, header=None, sep=";", encoding="latin1")
-                else:
-                    excel_file = pd.ExcelFile(arq_planilha)
-                    aba_escolhida = excel_file.sheet_names[0]
-                    if len(excel_file.sheet_names) > 1:
-                        aba_escolhida = st.selectbox("Selecione a aba da planilha", excel_file.sheet_names)
-                    df_bruto = pd.read_excel(excel_file, sheet_name=aba_escolhida, header=None)
-
+                df_bruto, origem_aba = carregar_fonte_tabular(arq_planilha)
                 itens_comparativos = detectar_tabela_cotacoes_comparativa(df_bruto)
 
                 if itens_comparativos is not None and len(itens_comparativos) > 0:
@@ -783,18 +854,19 @@ elif menu == "💰 Cotações & Preços":
                                 "Apenas o menor preço / valor adotado no orçamento"
                             ]
                         )
-                        confirmar_imp = st.form_submit_button("🚀 Arquivar planilha e importar tudo para o catálogo", type="primary")
+                        confirmar_imp = st.form_submit_button("🚀 Arquivar arquivo e importar tudo para o catálogo", type="primary")
 
                     if confirmar_imp:
                         if not nome_orc.strip():
                             st.error("Informe uma identificação para o orçamento.")
                         else:
+                            detalhe_origem = f"Importado de {arq_planilha.name}" + (f" ({origem_aba})" if origem_aba else "")
                             cid_novo = write(
                                 "INSERT INTO cotacoes(processo, data_cotacao, objeto, status, observacoes) VALUES(?, ?, ?, 'Concluída', ?)",
-                                (nome_orc.strip(), str(data_orc), f"Importado de {arq_planilha.name}", "Importação automática de Tabela de Cotações")
+                                (nome_orc.strip(), str(data_orc), detalhe_origem, "Importação automática de Tabela de Cotações")
                             )
                             arq_planilha.seek(0)
-                            salvar_arquivo_anexo(arq_planilha, "cotacao", int(cid_novo), "Proposta comercial / Orçamento", "Planilha original importada")
+                            salvar_arquivo_anexo(arq_planilha, "cotacao", int(cid_novo), "Proposta comercial / Orçamento", "Arquivo original importado")
 
                             qtd_mat_novos = 0
                             qtd_precos_salvos = 0
@@ -834,7 +906,7 @@ elif menu == "💰 Cotações & Preços":
 
                             st.session_state["msg_import"] = (
                                 f"Importação concluída! {qtd_precos_salvos} registros de preço importados "
-                                f"({qtd_mat_novos} materiais novos cadastrados) e a planilha original foi arquivada."
+                                f"({qtd_mat_novos} materiais novos cadastrados) e o arquivo original foi arquivado."
                             )
                             st.rerun()
 
@@ -848,7 +920,7 @@ elif menu == "💰 Cotações & Preços":
                     if not df_raw.empty:
                         st.dataframe(df_raw.head(8), use_container_width=True, hide_index=True)
                         cols_plan = list(df_raw.columns)
-                        cols_opc = ["(Não tem na planilha)"] + cols_plan
+                        cols_opc = ["(Não tem no arquivo)"] + cols_plan
 
                         with st.form("form_confirmar_import_simples"):
                             g1, g2, g3 = st.columns([1.5, 1, 1.5])
@@ -866,13 +938,14 @@ elif menu == "💰 Cotações & Preços":
                             col_forn = m5.selectbox("Coluna Fornecedor", cols_opc, index=achar_coluna_padrao(cols_opc, ["forn", "empresa"]))
                             col_cod = m6.selectbox("Coluna Código / Ref.", cols_opc, index=achar_coluna_padrao(cols_opc, ["ref", "cod"]))
 
-                            confirmar_s = st.form_submit_button("🚀 Arquivar planilha e importar itens", type="primary")
+                            confirmar_s = st.form_submit_button("🚀 Arquivar arquivo e importar itens", type="primary")
 
                         if confirmar_s and nome_orc.strip():
-                            cid_novo = write("INSERT INTO cotacoes(processo, data_cotacao, objeto, status, observacoes) VALUES(?, ?, ?, 'Concluída', ?)", (nome_orc.strip(), str(data_orc), f"Importado de {arq_planilha.name}", "Importação de planilha"))
+                            detalhe_origem = f"Importado de {arq_planilha.name}" + (f" ({origem_aba})" if origem_aba else "")
+                            cid_novo = write("INSERT INTO cotacoes(processo, data_cotacao, objeto, status, observacoes) VALUES(?, ?, ?, 'Concluída', ?)", (nome_orc.strip(), str(data_orc), detalhe_origem, "Importação de arquivo"))
                             fid_default = obter_ou_criar_fornecedor(forn_padrao.strip())[0] if forn_padrao.strip() else None
                             arq_planilha.seek(0)
-                            salvar_arquivo_anexo(arq_planilha, "cotacao", int(cid_novo), "Proposta comercial / Orçamento", "Planilha original importada", fid_default)
+                            salvar_arquivo_anexo(arq_planilha, "cotacao", int(cid_novo), "Proposta comercial / Orçamento", "Arquivo original importado", fid_default)
 
                             qtd_imp, qtd_nov = 0, 0
                             for _, linha in df_raw.iterrows():
@@ -882,13 +955,13 @@ elif menu == "💰 Cotações & Preços":
                                 preco_val = parse_numero(linha.get(col_preco))
                                 if preco_val <= 0:
                                     continue
-                                qtd_val = parse_numero(linha.get(col_qtd)) if col_qtd != "(Não tem na planilha)" else 1.0
+                                qtd_val = parse_numero(linha.get(col_qtd)) if col_qtd != "(Não tem no arquivo)" else 1.0
                                 if qtd_val <= 0:
                                     qtd_val = 1.0
-                                unid_val = str(linha.get(col_unid)).strip() if (col_unid != "(Não tem na planilha)" and pd.notna(linha.get(col_unid))) else "un"
-                                cod_val = str(linha.get(col_cod)).strip() if (col_cod != "(Não tem na planilha)" and pd.notna(linha.get(col_cod))) else ""
+                                unid_val = str(linha.get(col_unid)).strip() if (col_unid != "(Não tem no arquivo)" and pd.notna(linha.get(col_unid))) else "un"
+                                cod_val = str(linha.get(col_cod)).strip() if (col_cod != "(Não tem no arquivo)" and pd.notna(linha.get(col_cod))) else ""
 
-                                if col_forn != "(Não tem na planilha)" and pd.notna(linha.get(col_forn)) and str(linha.get(col_forn)).strip():
+                                if col_forn != "(Não tem no arquivo)" and pd.notna(linha.get(col_forn)) and str(linha.get(col_forn)).strip():
                                     fid_linha, _ = obter_ou_criar_fornecedor(str(linha.get(col_forn)).strip())
                                 elif fid_default:
                                     fid_linha = fid_default
@@ -905,10 +978,10 @@ elif menu == "💰 Cotações & Preços":
                                 )
                                 qtd_imp += 1
 
-                            st.session_state["msg_import"] = f"Concluído! {qtd_imp} itens importados ({qtd_nov} materiais novos) e planilha arquivada."
+                            st.session_state["msg_import"] = f"Concluído! {qtd_imp} itens importados ({qtd_nov} materiais novos) e arquivo arquivado."
                             st.rerun()
             except Exception as erro:
-                st.error(f"Erro ao processar planilha: {erro}")
+                st.error(f"Erro ao processar arquivo: {erro}")
 
     with aba_cot_lista:
         with st.form("cot"):
