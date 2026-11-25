@@ -936,9 +936,9 @@ elif menu == "📦 Materiais & Fornecedores":
                 dn = b.text_input("DN")
                 pn = b.text_input("PN")
                 mat = a.selectbox("Material de fabricação", MATERIAIS_FAB)
-                conex = b.selectbox("Tipo de conexão", CONEXOES)
+                conex = a.selectbox("Tipo de conexão", CONEXOES)
                 ac = a.selectbox("Acionamento", ACIONAMENTOS)
-                aplic = b.selectbox("Aplicação", APLICACOES)
+                aplic = a.selectbox("Aplicação", APLICACOES)
                 palavras = st.text_input("Palavras-chave (separadas por vírgula)")
                 desc = st.text_area("Descrição técnica / observações")
                 status = st.selectbox("Status", STATUS_MAT)
@@ -984,7 +984,11 @@ elif menu == "📦 Materiais & Fornecedores":
                 st.info("Nenhum material cadastrado.")
             else:
                 st.dataframe(mats[["id", "codigo", "descricao", "categoria", "fabricante", "dn", "pn", "status"]], use_container_width=True, hide_index=True)
-                mid_edit = st.selectbox("Selecione o material pelo ID", mats["id"].tolist(), format_func=lambda i: f"ID {i} — {mats.loc[mats['id']==i, 'descricao'].iloc[0]}")
+                mapa_mats = {
+                    int(r["id"]): f"ID {int(r['id'])} — {r['descricao']}"
+                    for _, r in mats.iterrows()
+                }
+                mid_edit = st.selectbox("Selecione o material pelo ID", options=list(mapa_mats.keys()), format_func=lambda i: mapa_mats.get(i, f"ID {i}"))
                 item = mats[mats["id"] == mid_edit].iloc[0]
 
                 with st.form("form_editar_material"):
@@ -998,10 +1002,10 @@ elif menu == "📦 Materiais & Fornecedores":
                     e_codfab = a.text_input("Código do fabricante", value=item["codigo_fabricante"] or "")
                     e_dn = b.text_input("DN", value=item["dn"] or "")
                     e_pn = a.text_input("PN", value=item["pn"] or "")
-                    e_mat = a.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
-                    e_conex = b.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
+                    e_mat = b.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
+                    e_conex = a.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
                     e_ac = b.selectbox("Acionamento", ACIONAMENTOS, index=idx_opcao(ACIONAMENTOS, item["acionamento"]))
-                    e_aplic = b.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
+                    e_aplic = a.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
                     e_palavras = st.text_input("Palavras-chave", value=item["palavras_chave"] or "")
                     e_desc = st.text_area("Descrição técnica", value=item["descricao_tecnica"] or "")
                     e_status = st.selectbox("Status", STATUS_MAT, index=idx_opcao(STATUS_MAT, item["status"]))
@@ -1048,7 +1052,7 @@ elif menu == "📦 Materiais & Fornecedores":
                 cnpj = a.text_input("CNPJ")
                 contato = b.text_input("Contato comercial")
                 email = a.text_input("E-mail")
-                telefone = a.text_input("Telefone")
+                telefone = b.text_input("Telefone")
                 site = st.text_input("Site")
                 obs = st.text_area("Observações")
                 ok = st.form_submit_button("Salvar fornecedor", type="primary")
@@ -1080,7 +1084,11 @@ elif menu == "📦 Materiais & Fornecedores":
             if forns.empty:
                 st.info("Nenhum fornecedor cadastrado.")
             else:
-                fid_edit = st.selectbox("Selecione o fornecedor pelo ID", forns["id"].tolist(), format_func=lambda i: f"ID {i} — {forns.loc[forns['id']==i, 'razao_social'].iloc[0]}")
+                mapa_forns = {
+                    int(r["id"]): f"ID {int(r['id'])} — {r['razao_social']}"
+                    for _, r in forns.iterrows()
+                }
+                fid_edit = st.selectbox("Selecione o fornecedor pelo ID", options=list(mapa_forns.keys()), format_func=lambda i: mapa_forns.get(i, f"ID {i}"))
                 f_item = forns[forns["id"] == fid_edit].iloc[0]
                 with st.form("form_editar_fornecedor"):
                     a, b = st.columns(2)
@@ -1132,10 +1140,18 @@ elif menu == "📦 Materiais & Fornecedores":
         if ms.empty or fs.empty:
             st.info("Cadastre ao menos um material e um fornecedor primeiro.")
         else:
+            mapa_v_mat = {
+                int(r["id"]): f"{r['descricao']} (DN {r['dn'] or '—'})"
+                for _, r in ms.iterrows()
+            }
+            mapa_v_forn = {
+                int(r["id"]): str(r["razao_social"])
+                for _, r in fs.iterrows()
+            }
             with st.form("rel"):
                 c1, c2 = st.columns(2)
-                mid = c1.selectbox("Material *", ms["id"].tolist(), format_func=lambda i: f"{ms.loc[ms['id']==i, 'descricao'].iloc[0]} (DN {ms.loc[ms['id']==i, 'dn'].iloc[0] or '—'})")
-                fid = c2.selectbox("Fornecedor *", fs["id"].tolist(), format_func=lambda i: fs.loc[fs["id"] == i, "razao_social"].iloc[0])
+                mid = c1.selectbox("Material *", options=list(mapa_v_mat.keys()), format_func=lambda i: mapa_v_mat.get(i, str(i)))
+                fid = c2.selectbox("Fornecedor *", options=list(mapa_v_forn.keys()), format_func=lambda i: mapa_v_forn.get(i, str(i)))
                 c3, c4, c5 = st.columns(3)
                 tipo = c3.selectbox("Tipo de relação", ["Forneceu", "Cotou", "Forneceu similar"])
                 fabricante = c4.text_input("Fabricante ofertado")
@@ -1382,11 +1398,23 @@ elif menu == "💰 Cotações & Preços":
         if cots.empty or ms.empty or fs.empty:
             st.info("Cadastre ou importe uma cotação, material e fornecedor para gerenciar itens.")
         else:
-            cid = st.selectbox("Selecione a cotação / orçamento", cots["id"].tolist(), format_func=lambda i: f"ID {i} | {cots.loc[cots['id']==i, 'processo'].iloc[0] or 'Sem nº'} — {cots.loc[cots['id']==i, 'objeto'].iloc[0] or ''}")
+            mapa_cots = {
+                int(r["id"]): f"ID {int(r['id'])} | {r['processo'] or 'Sem nº'} — {r['objeto'] or ''}"
+                for _, r in cots.iterrows()
+            }
+            mapa_ci_mat = {
+                int(r["id"]): f"{r['descricao']} (DN {r['dn'] or '—'})"
+                for _, r in ms.iterrows()
+            }
+            mapa_ci_forn = {
+                int(r["id"]): str(r["razao_social"])
+                for _, r in fs.iterrows()
+            }
+            cid = st.selectbox("Selecione a cotação / orçamento", options=list(mapa_cots.keys()), format_func=lambda i: mapa_cots.get(i, f"ID {i}"))
             with st.form("form_item_cotacao"):
                 col1, col2 = st.columns(2)
-                mid_c = col1.selectbox("Material *", ms["id"].tolist(), format_func=lambda i: f"{ms.loc[ms['id']==i, 'descricao'].iloc[0]} (DN {ms.loc[ms['id']==i, 'dn'].iloc[0] or '—'})")
-                fid_c = col2.selectbox("Fornecedor *", fs["id"].tolist(), format_func=lambda i: fs.loc[fs["id"] == i, "razao_social"].iloc[0])
+                mid_c = col1.selectbox("Material *", options=list(mapa_ci_mat.keys()), format_func=lambda i: mapa_ci_mat.get(i, str(i)))
+                fid_c = col2.selectbox("Fornecedor *", options=list(mapa_ci_forn.keys()), format_func=lambda i: mapa_ci_forn.get(i, str(i)))
                 c1, c2, c3, c4 = st.columns([1, 1, 1.2, 1.3])
                 qtd = c1.number_input("Quantidade *", min_value=0.01, value=1.0, step=1.0)
                 unid = c2.text_input("Unidade", value="un")
@@ -1423,12 +1451,16 @@ elif menu == "💰 Cotações & Preços":
                 df_ex["Total"] = fmt_col_brl(df_ex, "Total")
                 st.dataframe(df_ex, use_container_width=True, hide_index=True)
 
+                mapa_del = {
+                    int(r["id"]): f"Item ID {int(r['id'])} — {r.get('Material', 'Item')} | {r.get('Fornecedor', 'Fornecedor')}"
+                    for _, r in itens_cot.iterrows()
+                }
                 item_del = st.selectbox(
                     "Remover item lançado (se necessário)",
-                    itens_cot["id"].tolist(),
-                    format_func=lambda i: f"Item ID {i} — {itens_cot.loc[itens_cot['id']==i, 'Material'].iloc[0]} | {itens_cot.loc[itens_cot['id']==i, 'Fornecedor'].iloc[0]}"
+                    options=list(mapa_del.keys()),
+                    format_func=lambda i: mapa_del.get(i, f"Item ID {i}")
                 )
-                if st.button("Remover item selecionado"):
+                if item_del is not None and st.button("Remover item selecionado"):
                     write("DELETE FROM cotacao_itens WHERE id=?", (int(item_del),))
                     st.success("Item removido.")
                     st.rerun()
@@ -1468,7 +1500,11 @@ elif menu == "💰 Cotações & Preços":
             st.info("Nenhuma cotação cadastrada.")
         else:
             st.dataframe(cots_ed, use_container_width=True, hide_index=True)
-            cid_edit = st.selectbox("Selecione a cotação pelo ID", cots_ed["id"].tolist(), format_func=lambda i: f"ID {i} | {cots_ed.loc[cots_ed['id']==i, 'processo'].iloc[0] or 'Sem nº'} — {cots_ed.loc[cots_ed['id']==i, 'objeto'].iloc[0] or ''}")
+            mapa_cots_ed = {
+                int(r["id"]): f"ID {int(r['id'])} | {r['processo'] or 'Sem nº'} — {r['objeto'] or ''}"
+                for _, r in cots_ed.iterrows()
+            }
+            cid_edit = st.selectbox("Selecione a cotação pelo ID", options=list(mapa_cots_ed.keys()), format_func=lambda i: mapa_cots_ed.get(i, f"ID {i}"))
             c_item = cots_ed[cots_ed["id"] == cid_edit].iloc[0]
 
             try:
@@ -1607,7 +1643,7 @@ else:
 
         if opcoes_ids:
             with st.form("form_upload_anexo"):
-                ent_id = st.selectbox("Selecione o registro *", opcoes_ids, format_func=lambda i: mapa_labels[i])
+                ent_id = st.selectbox("Selecione o registro *", options=opcoes_ids, format_func=lambda i: mapa_labels.get(i, str(i)))
                 tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC)
                 arquivo = st.file_uploader("Escolha o arquivo", type=EXTENSOES_ACEITAS)
                 obs_ax = st.text_input("Observações")
