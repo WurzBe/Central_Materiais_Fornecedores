@@ -1,0 +1,22 @@
+CENTRAL DE MATERIAIS E FORNECEDORES — VERSÃO INICIAL
+
+REQUISITOS
+- Windows 10/11
+- Python 3 instalado (marque Add Python to PATH na instalação)
+
+INICIAR
+1. Extraia o ZIP para uma pasta.
+2. Dê duplo clique em INICIAR_NO_WINDOWS.bat.
+3. Na primeira execução, as dependências gratuitas serão instaladas pela internet.
+4. O navegador abrirá a aplicação local.
+
+DADOS
+- O banco central.db será criado nesta pasta.
+- Faça backup periódico desse arquivo.
+- Não use dados comerciais confidenciais ou dados pessoais reais sem autorização da empresa.
+
+LIMITAÇÕES DESTA VERSÃO
+- É um protótipo local, para um usuário/computador.
+- Não possui login nem acesso simultâneo multiusuário.
+- Para uso da equipe, precisará ser instalado em servidor corporativo com autenticação, permissões e backup.
+- Os componentes de software não exigem licença paga; a instalação requer internet para baixar as dependências.
