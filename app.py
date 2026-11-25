@@ -255,11 +255,27 @@ def idx_opcao(opcoes, valor):
 
 
 def fmt_brl(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    try:
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+            num = 0.0
+        else:
+            num = float(valor)
+    except (TypeError, ValueError):
+        num = 0.0
+    return f"R$ {num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_col_brl(df, col_name, default=0.0):
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    if col_name not in df.columns:
+        df[col_name] = default
+    s = pd.to_numeric(df[col_name], errors="coerce").fillna(default)
+    return s.apply(fmt_brl)
 
 
 def parse_numero(val):
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
     if isinstance(val, (int, float)):
         return float(val)
@@ -414,7 +430,6 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
     if col_desc is None:
         return None
 
-    # 1. Detecta blocos agrupados no cabecalho principal (ex.: FORNECEDOR 1, FORNECEDOR 2, COTACAO 1...)
     forn_blocks = []
     headers_nao_vazios = [
         (c, str(val).strip(), norm(val))
@@ -481,7 +496,6 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
             if c_nome is not None and c_preco is not None:
                 forn_blocks.append((c_nome, c_preco, c_preco_fallback, c_data))
 
-    # 2. Fallback: sub-cabecalho repetido com "Nome" + "Cotacao / Preco / Valor"
     if not forn_blocks:
         for c in range(len(row_sub) - 1):
             s_cur = norm(row_sub.iloc[c]) if pd.notna(row_sub.iloc[c]) else ""
@@ -490,7 +504,6 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
                 s_dt = norm(row_sub.iloc[c + 2]) if (c + 2 < len(row_sub) and pd.notna(row_sub.iloc[c + 2])) else ""
                 forn_blocks.append((c, c + 1, None, c + 2 if "data" in s_dt else None))
 
-    # 3. Fallback: nome de cada fornecedor direto no cabecalho principal
     forn_header_cols = []
     data_start_row = header_row + 2 if forn_blocks else header_row + 1
 
@@ -856,31 +869,32 @@ if menu == "🔍 Pesquisa & Catálogo":
                     (int(m.id),)
                 )
                 if not hist_cot.empty:
-                    df_h = hist_cot.drop(columns=["cot_id"]).copy()
-                    df_h["Preço_Unit"] = df_h["Preço_Unit"].apply(fmt_brl)
+                    df_h = hist_cot.drop(columns=["cot_id"], errors="ignore").copy()
+                    df_h["Preço_Unit"] = fmt_col_brl(df_h, "Preço_Unit")
                     st.dataframe(df_h, use_container_width=True, hide_index=True)
 
-                    cot_ids = tuple(int(x) for x in hist_cot["cot_id"].unique().tolist())
-                    ph = ",".join(["?"] * len(cot_ids))
-                    anexos_orc = read(
-                        f"""SELECT a.id, a.entidade_id, a.nome_original, a.arquivo_salvo, a.data_upload,
-                                   c.processo, f.razao_social AS fornecedor_nome
-                            FROM anexos a
-                            LEFT JOIN cotacoes c ON c.id = a.entidade_id
-                            LEFT JOIN fornecedores f ON f.id = a.fornecedor_id
-                            WHERE a.entidade_tipo='cotacao' AND a.entidade_id IN ({ph})
-                            ORDER BY a.id DESC""",
-                        cot_ids
-                    )
-                    if not anexos_orc.empty:
-                        st.markdown("**Planilhas e propostas vinculadas**")
-                        for _, ax_o in anexos_orc.iterrows():
-                            c_o1, c_o2 = st.columns([4, 1])
-                            forn_txt = f" | Fornecedor: **{ax_o['fornecedor_nome']}**" if ax_o["fornecedor_nome"] else ""
-                            c_o1.write(f"📎 **{ax_o['nome_original']}** — {ax_o['processo'] or 'Cotação'}{forn_txt} ({ax_o['data_upload'] or ''})")
-                            dados_o = storage_download(ax_o["arquivo_salvo"])
-                            if dados_o is not None:
-                                c_o2.download_button("Baixar arquivo", data=dados_o, file_name=ax_o["nome_original"], key=f"dl_om_{m.id}_{ax_o['id']}")
+                    cot_ids = tuple(int(x) for x in hist_cot["cot_id"].dropna().unique().tolist())
+                    if cot_ids:
+                        ph = ",".join(["?"] * len(cot_ids))
+                        anexos_orc = read(
+                            f"""SELECT a.id, a.entidade_id, a.nome_original, a.arquivo_salvo, a.data_upload,
+                                       c.processo, f.razao_social AS fornecedor_nome
+                                FROM anexos a
+                                LEFT JOIN cotacoes c ON c.id = a.entidade_id
+                                LEFT JOIN fornecedores f ON f.id = a.fornecedor_id
+                                WHERE a.entidade_tipo='cotacao' AND a.entidade_id IN ({ph})
+                                ORDER BY a.id DESC""",
+                            cot_ids
+                        )
+                        if not anexos_orc.empty:
+                            st.markdown("**Planilhas e propostas vinculadas**")
+                            for _, ax_o in anexos_orc.iterrows():
+                                c_o1, c_o2 = st.columns([4, 1])
+                                forn_txt = f" | Fornecedor: **{ax_o['fornecedor_nome']}**" if ax_o.get("fornecedor_nome") else ""
+                                c_o1.write(f"📎 **{ax_o['nome_original']}** — {ax_o.get('processo') or 'Cotação'}{forn_txt} ({ax_o.get('data_upload') or ''})")
+                                dados_o = storage_download(ax_o["arquivo_salvo"])
+                                if dados_o is not None:
+                                    c_o2.download_button("Baixar arquivo", data=dados_o, file_name=ax_o["nome_original"], key=f"dl_om_{m.id}_{ax_o['id']}")
                 else:
                     st.caption("Sem cotações registradas para este material.")
 
@@ -891,7 +905,7 @@ if menu == "🔍 Pesquisa & Catálogo":
                 else:
                     for _, ax in anexos_mat.iterrows():
                         col_a, col_b = st.columns([4, 1])
-                        col_a.write(f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax['data_upload'] or ''})")
+                        col_a.write(f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax.get('data_upload') or ''})")
                         dados_m = storage_download(ax["arquivo_salvo"])
                         if dados_m is not None:
                             col_b.download_button("Baixar", data=dados_m, file_name=ax["nome_original"], key=f"dl_pm_{ax['id']}")
@@ -920,11 +934,11 @@ elif menu == "📦 Materiais & Fornecedores":
                 modelo = b.text_input("Modelo")
                 codfab = a.text_input("Código do fabricante")
                 dn = b.text_input("DN")
-                pn = a.text_input("PN")
-                mat = b.selectbox("Material de fabricação", MATERIAIS_FAB)
-                conex = a.selectbox("Tipo de conexão", CONEXOES)
-                ac = b.selectbox("Acionamento", ACIONAMENTOS)
-                aplic = a.selectbox("Aplicação", APLICACOES)
+                pn = b.text_input("PN")
+                mat = a.selectbox("Material de fabricação", MATERIAIS_FAB)
+                conex = b.selectbox("Tipo de conexão", CONEXOES)
+                ac = a.selectbox("Acionamento", ACIONAMENTOS)
+                aplic = b.selectbox("Aplicação", APLICACOES)
                 palavras = st.text_input("Palavras-chave (separadas por vírgula)")
                 desc = st.text_area("Descrição técnica / observações")
                 status = st.selectbox("Status", STATUS_MAT)
@@ -984,10 +998,10 @@ elif menu == "📦 Materiais & Fornecedores":
                     e_codfab = a.text_input("Código do fabricante", value=item["codigo_fabricante"] or "")
                     e_dn = b.text_input("DN", value=item["dn"] or "")
                     e_pn = a.text_input("PN", value=item["pn"] or "")
-                    e_mat = b.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
-                    e_conex = a.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
+                    e_mat = a.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
+                    e_conex = b.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
                     e_ac = b.selectbox("Acionamento", ACIONAMENTOS, index=idx_opcao(ACIONAMENTOS, item["acionamento"]))
-                    e_aplic = a.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
+                    e_aplic = b.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
                     e_palavras = st.text_input("Palavras-chave", value=item["palavras_chave"] or "")
                     e_desc = st.text_area("Descrição técnica", value=item["descricao_tecnica"] or "")
                     e_status = st.selectbox("Status", STATUS_MAT, index=idx_opcao(STATUS_MAT, item["status"]))
@@ -1034,7 +1048,7 @@ elif menu == "📦 Materiais & Fornecedores":
                 cnpj = a.text_input("CNPJ")
                 contato = b.text_input("Contato comercial")
                 email = a.text_input("E-mail")
-                telefone = b.text_input("Telefone")
+                telefone = a.text_input("Telefone")
                 site = st.text_input("Site")
                 obs = st.text_area("Observações")
                 ok = st.form_submit_button("Salvar fornecedor", type="primary")
@@ -1405,8 +1419,8 @@ elif menu == "💰 Cotações & Preços":
                 st.caption("Nenhum item lançado nesta cotação.")
             else:
                 df_ex = itens_cot.copy()
-                df_ex["Preço_Unit"] = df_ex["Preço_Unit"].apply(fmt_brl)
-                df_ex["Total"] = df_ex["Total"].apply(fmt_brl)
+                df_ex["Preço_Unit"] = fmt_col_brl(df_ex, "Preço_Unit")
+                df_ex["Total"] = fmt_col_brl(df_ex, "Total")
                 st.dataframe(df_ex, use_container_width=True, hide_index=True)
 
                 item_del = st.selectbox(
@@ -1433,9 +1447,9 @@ elif menu == "💰 Cotações & Preços":
                 for _, ax_c in anexos_desta_cot.iterrows():
                     with st.container(border=True):
                         c_a1, c_a2, c_a3 = st.columns([4, 1, 1])
-                        forn_label = f" • Fornecedor: **{ax_c['fornecedor_nome']}**" if ax_c["fornecedor_nome"] else ""
-                        c_a1.write(f"**{ax_c['tipo_documento']}:** {ax_c['nome_original']}{forn_label} ({ax_c['data_upload'] or ''})")
-                        if ax_c["observacoes"]:
+                        forn_label = f" • Fornecedor: **{ax_c['fornecedor_nome']}**" if ax_c.get("fornecedor_nome") else ""
+                        c_a1.write(f"**{ax_c['tipo_documento']}:** {ax_c['nome_original']}{forn_label} ({ax_c.get('data_upload') or ''})")
+                        if ax_c.get("observacoes"):
                             c_a1.caption(ax_c["observacoes"])
                         dados_c = storage_download(ax_c["arquivo_salvo"])
                         if dados_c is not None:
@@ -1558,15 +1572,15 @@ else:
         else:
             for _, ax in df_ax.iterrows():
                 if ax["entidade_tipo"] == "material":
-                    vinculo_txt = f"Material: {ax['mat_nome'] or ax['entidade_id']}"
+                    vinculo_txt = f"Material: {ax.get('mat_nome') or ax['entidade_id']}"
                 elif ax["entidade_tipo"] == "cotacao":
-                    vinculo_txt = f"Orçamento/Cotação: {ax['cot_proc'] or ax['entidade_id']}"
+                    vinculo_txt = f"Orçamento/Cotação: {ax.get('cot_proc') or ax['entidade_id']}"
                 else:
-                    vinculo_txt = f"Fornecedor: {ax['forn_ent_nome'] or ax['entidade_id']}"
+                    vinculo_txt = f"Fornecedor: {ax.get('forn_ent_nome') or ax['entidade_id']}"
 
                 with st.container(border=True):
                     c1, c2, c3 = st.columns([4, 1, 1])
-                    c1.write(f"**{ax['tipo_documento']}** — **{ax['nome_original']}** ({ax['data_upload'] or ''})\n\n📌 _{vinculo_txt}_")
+                    c1.write(f"**{ax['tipo_documento']}** — **{ax['nome_original']}** ({ax.get('data_upload') or ''})\n\n📌 _{vinculo_txt}_")
                     dados_ax = storage_download(ax["arquivo_salvo"])
                     if dados_ax is not None:
                         c2.download_button("Baixar", data=dados_ax, file_name=ax["nome_original"], key=f"dl_ax_{ax['id']}")
