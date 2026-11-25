@@ -919,10 +919,62 @@ if menu == "🔍 Pesquisa & Catálogo":
 
     sql_count = "SELECT COUNT(*) AS n FROM materiais WHERE 1=1" + sql.split("WHERE 1=1", 1)[1]
     total_encontrados = int(read(sql_count, p)["n"].iloc[0])
-    pagina_tam = 50
-    paginas = max(1, (total_encontrados + pagina_tam - 1) // pagina_tam)
-    pagina = st.number_input("Página do catálogo", min_value=1, max_value=paginas, value=1, step=1, key="pagina_catalogo")
-    rows = read(sql + " ORDER BY descricao LIMIT ? OFFSET ?", p + [pagina_tam, (int(pagina)-1)*pagina_tam])
+    # Ordenação configurável. As expressões SQL ficam fixas no código
+    # (lista permitida), evitando inserir texto digitado pelo usuário na consulta.
+    opcoes_ordem = {
+        "Código CAJ (A–Z)": (
+            "CASE WHEN codigo IS NULL OR TRIM(codigo) = '' THEN 1 ELSE 0 END, "
+            "codigo ASC, descricao ASC"
+        ),
+        "Descrição (A–Z)": "LOWER(descricao) ASC, codigo ASC",
+        "Descrição (Z–A)": "LOWER(descricao) DESC, codigo ASC",
+        "Categoria": (
+            "CASE WHEN categoria IS NULL OR TRIM(categoria) = '' THEN 1 ELSE 0 END, "
+            "LOWER(categoria) ASC, codigo ASC, descricao ASC"
+        ),
+        "DN": (
+            "CASE WHEN dn IS NULL OR TRIM(dn) = '' THEN 1 ELSE 0 END, "
+            "dn ASC, codigo ASC, descricao ASC"
+        ),
+        "Status": (
+            "CASE WHEN status IS NULL OR TRIM(status) = '' THEN 1 ELSE 0 END, "
+            "LOWER(status) ASC, codigo ASC, descricao ASC"
+        ),
+        "Mais recentemente cadastrados": "id DESC",
+    }
+    c_ordem, c_tamanho = st.columns([2, 1])
+    ordem_label = c_ordem.selectbox(
+        "Ordenar materiais por",
+        list(opcoes_ordem.keys()),
+        index=0,
+        key="ordem_catalogo",
+    )
+    pagina_tam = c_tamanho.selectbox(
+        "Itens por página",
+        [50, 100, 200],
+        index=0,
+        key="tamanho_pagina_catalogo",
+    )
+
+    paginas = max(1, (total_encontrados + int(pagina_tam) - 1) // int(pagina_tam))
+    # Reajusta a página quando uma busca/filtro reduz a quantidade de resultados.
+    pagina_atual = int(st.session_state.get("pagina_catalogo", 1) or 1)
+    if pagina_atual > paginas:
+        st.session_state["pagina_catalogo"] = paginas
+        pagina_atual = paginas
+    pagina = st.number_input(
+        "Página do catálogo",
+        min_value=1,
+        max_value=paginas,
+        value=pagina_atual,
+        step=1,
+        key="pagina_catalogo",
+    )
+    order_by = opcoes_ordem[ordem_label]
+    rows = read(
+        sql + f" ORDER BY {order_by} LIMIT ? OFFSET ?",
+        p + [int(pagina_tam), (int(pagina)-1)*int(pagina_tam)],
+    )
     st.caption(f"Exibindo **{len(rows)}** de **{total_encontrados}** material(is) encontrado(s) — página {int(pagina)} de {paginas}")
 
     if rows.empty:
@@ -1794,4 +1846,3 @@ else:
             st.info("**Banco na nuvem ativo:** os dados estão salvos no PostgreSQL e os anexos no Storage.")
         else:
             st.info("**Backup completo local:** copie o arquivo `central.db` e a pasta `anexos/` da pasta do projeto.")
-            
