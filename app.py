@@ -1,77 +1,241 @@
+import os
 import re
 import sqlite3
 import tempfile
+import urllib.parse
 import uuid
 from datetime import date
 from pathlib import Path
+import requests
 import streamlit as st
 import pandas as pd
 
-DB = Path(__file__).with_name("central.db")
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
+DB_LOCAL = Path(__file__).with_name("central.db")
 ANEXOS_DIR = Path(__file__).with_name("anexos")
 ANEXOS_DIR.mkdir(exist_ok=True)
 
 
+def get_secret(chave, padrao=""):
+    if chave in os.environ and os.environ[chave]:
+        return os.environ[chave]
+    try:
+        if chave in st.secrets:
+            return str(st.secrets[chave])
+    except Exception:
+        pass
+    return padrao
+
+
+DATABASE_URL = get_secret("DATABASE_URL")
+SUPABASE_URL = get_secret("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = get_secret("SUPABASE_KEY")
+SUPABASE_BUCKET = get_secret("SUPABASE_BUCKET", "anexos")
+USAR_POSTGRES = bool(DATABASE_URL)
+USAR_STORAGE = bool(SUPABASE_URL and SUPABASE_KEY)
+
+
 def db():
-    c = sqlite3.connect(DB)
+    if USAR_POSTGRES:
+        if psycopg2 is None:
+            raise ImportError("Biblioteca 'psycopg2-binary' não instalada. Adicione psycopg2-binary ao requirements.txt.")
+        return psycopg2.connect(DATABASE_URL)
+    c = sqlite3.connect(DB_LOCAL)
     c.execute("PRAGMA foreign_keys=ON")
     return c
 
 
+def _prep_sql(sql):
+    if USAR_POSTGRES:
+        return sql.replace("?", "%s")
+    return sql
+
+
 def init():
-    with db() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS materiais (
-          id INTEGER PRIMARY KEY, codigo TEXT UNIQUE, descricao TEXT NOT NULL,
-          categoria TEXT, subcategoria TEXT, fabricante TEXT, modelo TEXT,
-          codigo_fabricante TEXT, dn TEXT, pn TEXT, material_fabricacao TEXT,
-          tipo_conexao TEXT, acionamento TEXT, aplicacao TEXT, palavras_chave TEXT,
-          descricao_tecnica TEXT, status TEXT DEFAULT 'Em revisão'
-        );
-        CREATE TABLE IF NOT EXISTS fornecedores (
-          id INTEGER PRIMARY KEY, razao_social TEXT NOT NULL, nome_fantasia TEXT,
-          cnpj TEXT, contato TEXT, email TEXT, telefone TEXT, site TEXT, observacoes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS fornecimentos (
-          id INTEGER PRIMARY KEY, material_id INTEGER NOT NULL, fornecedor_id INTEGER NOT NULL,
-          tipo_relacao TEXT NOT NULL, fabricante_ofertado TEXT, modelo_ofertado TEXT,
-          data_interacao TEXT, observacoes TEXT,
-          FOREIGN KEY(material_id) REFERENCES materiais(id),
-          FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
-        );
-        CREATE TABLE IF NOT EXISTS cotacoes (
-          id INTEGER PRIMARY KEY, processo TEXT, data_cotacao TEXT, objeto TEXT,
-          status TEXT, observacoes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS cotacao_itens (
-          id INTEGER PRIMARY KEY, cotacao_id INTEGER NOT NULL,
-          material_id INTEGER NOT NULL, fornecedor_id INTEGER NOT NULL,
-          quantidade REAL DEFAULT 1, unidade TEXT DEFAULT 'un',
-          preco_unitario REAL NOT NULL, prazo_entrega TEXT, observacoes TEXT,
-          FOREIGN KEY(cotacao_id) REFERENCES cotacoes(id),
-          FOREIGN KEY(material_id) REFERENCES materiais(id),
-          FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
-        );
-        CREATE TABLE IF NOT EXISTS anexos (
-          id INTEGER PRIMARY KEY, entidade_tipo TEXT NOT NULL, entidade_id INTEGER NOT NULL,
-          fornecedor_id INTEGER, tipo_documento TEXT, nome_original TEXT NOT NULL,
-          arquivo_salvo TEXT NOT NULL, data_upload TEXT, observacoes TEXT
-        );
-        """)
-        try:
-            c.execute("ALTER TABLE anexos ADD COLUMN fornecedor_id INTEGER")
-        except sqlite3.OperationalError:
-            pass
+    conn = db()
+    try:
+        if USAR_POSTGRES:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS materiais (
+                      id SERIAL PRIMARY KEY, codigo TEXT UNIQUE, descricao TEXT NOT NULL,
+                      categoria TEXT, subcategoria TEXT, fabricante TEXT, modelo TEXT,
+                      codigo_fabricante TEXT, dn TEXT, pn TEXT, material_fabricacao TEXT,
+                      tipo_conexao TEXT, acionamento TEXT, aplicacao TEXT, palavras_chave TEXT,
+                      descricao_tecnica TEXT, status TEXT DEFAULT 'Em revisão'
+                    );
+                    CREATE TABLE IF NOT EXISTS fornecedores (
+                      id SERIAL PRIMARY KEY, razao_social TEXT NOT NULL, nome_fantasia TEXT,
+                      cnpj TEXT, contato TEXT, email TEXT, telefone TEXT, site TEXT, observacoes TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS fornecimentos (
+                      id SERIAL PRIMARY KEY, material_id INTEGER NOT NULL REFERENCES materiais(id),
+                      fornecedor_id INTEGER NOT NULL REFERENCES fornecedores(id),
+                      tipo_relacao TEXT NOT NULL, fabricante_ofertado TEXT, modelo_ofertado TEXT,
+                      data_interacao TEXT, observacoes TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS cotacoes (
+                      id SERIAL PRIMARY KEY, processo TEXT, data_cotacao TEXT, objeto TEXT,
+                      status TEXT, observacoes TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS cotacao_itens (
+                      id SERIAL PRIMARY KEY, cotacao_id INTEGER NOT NULL REFERENCES cotacoes(id),
+                      material_id INTEGER NOT NULL REFERENCES materiais(id),
+                      fornecedor_id INTEGER NOT NULL REFERENCES fornecedores(id),
+                      quantidade DOUBLE PRECISION DEFAULT 1, unidade TEXT DEFAULT 'un',
+                      preco_unitario DOUBLE PRECISION NOT NULL, prazo_entrega TEXT, observacoes TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS anexos (
+                      id SERIAL PRIMARY KEY, entidade_tipo TEXT NOT NULL, entidade_id INTEGER NOT NULL,
+                      fornecedor_id INTEGER, tipo_documento TEXT, nome_original TEXT NOT NULL,
+                      arquivo_salvo TEXT NOT NULL, data_upload TEXT, observacoes TEXT
+                    );
+                    ALTER TABLE anexos ADD COLUMN IF NOT EXISTS fornecedor_id INTEGER;
+                    """)
+        else:
+            with conn:
+                conn.executescript("""
+                CREATE TABLE IF NOT EXISTS materiais (
+                  id INTEGER PRIMARY KEY, codigo TEXT UNIQUE, descricao TEXT NOT NULL,
+                  categoria TEXT, subcategoria TEXT, fabricante TEXT, modelo TEXT,
+                  codigo_fabricante TEXT, dn TEXT, pn TEXT, material_fabricacao TEXT,
+                  tipo_conexao TEXT, acionamento TEXT, aplicacao TEXT, palavras_chave TEXT,
+                  descricao_tecnica TEXT, status TEXT DEFAULT 'Em revisão'
+                );
+                CREATE TABLE IF NOT EXISTS fornecedores (
+                  id INTEGER PRIMARY KEY, razao_social TEXT NOT NULL, nome_fantasia TEXT,
+                  cnpj TEXT, contato TEXT, email TEXT, telefone TEXT, site TEXT, observacoes TEXT
+                );
+                CREATE TABLE IF NOT EXISTS fornecimentos (
+                  id INTEGER PRIMARY KEY, material_id INTEGER NOT NULL, fornecedor_id INTEGER NOT NULL,
+                  tipo_relacao TEXT NOT NULL, fabricante_ofertado TEXT, modelo_ofertado TEXT,
+                  data_interacao TEXT, observacoes TEXT,
+                  FOREIGN KEY(material_id) REFERENCES materiais(id),
+                  FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
+                );
+                CREATE TABLE IF NOT EXISTS cotacoes (
+                  id INTEGER PRIMARY KEY, processo TEXT, data_cotacao TEXT, objeto TEXT,
+                  status TEXT, observacoes TEXT
+                );
+                CREATE TABLE IF NOT EXISTS cotacao_itens (
+                  id INTEGER PRIMARY KEY, cotacao_id INTEGER NOT NULL,
+                  material_id INTEGER NOT NULL, fornecedor_id INTEGER NOT NULL,
+                  quantidade REAL DEFAULT 1, unidade TEXT DEFAULT 'un',
+                  preco_unitario REAL NOT NULL, prazo_entrega TEXT, observacoes TEXT,
+                  FOREIGN KEY(cotacao_id) REFERENCES cotacoes(id),
+                  FOREIGN KEY(material_id) REFERENCES materiais(id),
+                  FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
+                );
+                CREATE TABLE IF NOT EXISTS anexos (
+                  id INTEGER PRIMARY KEY, entidade_tipo TEXT NOT NULL, entidade_id INTEGER NOT NULL,
+                  fornecedor_id INTEGER, tipo_documento TEXT, nome_original TEXT NOT NULL,
+                  arquivo_salvo TEXT NOT NULL, data_upload TEXT, observacoes TEXT
+                );
+                """)
+                try:
+                    conn.execute("ALTER TABLE anexos ADD COLUMN fornecedor_id INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+    finally:
+        conn.close()
 
 
 def read(sql, params=()):
-    with db() as c:
-        return pd.read_sql_query(sql, c, params=params)
+    conn = db()
+    try:
+        sql_exec = _prep_sql(sql)
+        if USAR_POSTGRES:
+            with conn.cursor() as cur:
+                cur.execute(sql_exec, tuple(params) if params else None)
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                return pd.DataFrame(rows, columns=cols)
+        return pd.read_sql_query(sql_exec, conn, params=params)
+    finally:
+        conn.close()
 
 
 def write(sql, params=()):
-    with db() as c:
-        return c.execute(sql, params).lastrowid
+    conn = db()
+    try:
+        sql_exec = _prep_sql(sql).strip()
+        is_insert = sql_exec.upper().startswith("INSERT")
+        if USAR_POSTGRES:
+            if is_insert and "RETURNING" not in sql_exec.upper():
+                sql_exec = sql_exec.rstrip(";") + " RETURNING id"
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql_exec, tuple(params) if params else None)
+                    if is_insert:
+                        row = cur.fetchone()
+                        return int(row[0]) if row else None
+                    return None
+        with conn:
+            return conn.execute(sql_exec, params).lastrowid
+    finally:
+        conn.close()
+
+
+def _is_unique_violation(err):
+    if isinstance(err, sqlite3.IntegrityError):
+        return True
+    if psycopg2 is not None and isinstance(err, psycopg2.IntegrityError):
+        return True
+    return "unique" in str(err).lower() or "duplicate key" in str(err).lower()
+
+
+# ==============================================================================
+# ARMAZENAMENTO DE ANEXOS (SUPABASE STORAGE OU LOCAL)
+# ==============================================================================
+def _storage_headers(content_type=None):
+    h = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+
+def storage_upload(nome_unico, dados_bytes, content_type="application/octet-stream"):
+    if USAR_STORAGE:
+        path_enc = urllib.parse.quote(nome_unico, safe="")
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path_enc}"
+        headers = _storage_headers(content_type)
+        headers["x-upsert"] = "true"
+        resp = requests.post(url, headers=headers, data=dados_bytes, timeout=60)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Falha ao enviar anexo ao Supabase Storage ({resp.status_code}): {resp.text}")
+    else:
+        (ANEXOS_DIR / nome_unico).write_bytes(dados_bytes)
+
+
+def storage_download(nome_unico):
+    if USAR_STORAGE:
+        path_enc = urllib.parse.quote(nome_unico, safe="")
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path_enc}"
+        resp = requests.get(url, headers=_storage_headers(), timeout=60)
+        if resp.status_code == 200:
+            return resp.content
+        return None
+    arq = ANEXOS_DIR / nome_unico
+    return arq.read_bytes() if arq.exists() else None
+
+
+def storage_delete(nome_unico):
+    if USAR_STORAGE:
+        path_enc = urllib.parse.quote(nome_unico, safe="")
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path_enc}"
+        requests.delete(url, headers=_storage_headers(), timeout=30)
+    else:
+        arq = ANEXOS_DIR / nome_unico
+        if arq.exists():
+            arq.unlink()
 
 
 def norm(texto):
@@ -280,7 +444,6 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
         if re.match(r"^(fornecedor|cotação|cotacao|proposta|empresa)\s*\d+$", nh):
             c_fim = headers_nao_vazios[idx_h_pos + 1][0] if idx_h_pos + 1 < len(headers_nao_vazios) else len(row_sub)
 
-            # Verifica se o nome do fornecedor fica 1 coluna antes da ancora (ex.: col L antes de FORNECEDOR 1 em M)
             nome_a_esquerda = coluna_eh_texto_fornecedor(c_ini - 1)
             if nome_a_esquerda and (c_fim - 1) > c_ini and coluna_eh_texto_fornecedor(c_fim - 1):
                 c_fim -= 1
@@ -300,7 +463,6 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
                 elif c_data is None and "data" in sv:
                     c_data = col_i
 
-            # Fallback caso o sub-cabecalho nao tenha rotulos claros
             if c_nome is None or c_preco is None:
                 for col_i in range(c_ini, c_fim):
                     vals_col = [v for v in amostra_bloco.iloc[:, col_i].tolist() if pd.notna(v) and str(v).strip()]
@@ -328,7 +490,7 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
                 s_dt = norm(row_sub.iloc[c + 2]) if (c + 2 < len(row_sub) and pd.notna(row_sub.iloc[c + 2])) else ""
                 forn_blocks.append((c, c + 1, None, c + 2 if "data" in s_dt else None))
 
-    # 3. Fallback: nome de cada fornecedor direto no cabecalho principal (ex.: coluna "Tupy", coluna "Saint-Gobain")
+    # 3. Fallback: nome de cada fornecedor direto no cabecalho principal
     forn_header_cols = []
     data_start_row = header_row + 2 if forn_blocks else header_row + 1
 
@@ -474,11 +636,14 @@ def obter_ou_criar_material(descricao, codigo="", dn="", pn="", material_fab="",
             "INSERT INTO materiais(codigo, descricao, categoria, fabricante, dn, pn, material_fabricacao, status) VALUES(?,?,?,?,?,?,?,'Em revisão')",
             (cod_limpo or None, desc_limpa, cat_limpa, fab_limpo, dn_limpo, pn_limpo, mat_limpo)
         )
-    except sqlite3.IntegrityError:
-        novo_id = write(
-            "INSERT INTO materiais(descricao, categoria, fabricante, dn, pn, material_fabricacao, status) VALUES(?,?,?,?,?,?,'Em revisão')",
-            (desc_limpa, cat_limpa, fab_limpo, dn_limpo, pn_limpo, mat_limpo)
-        )
+    except Exception as err:
+        if _is_unique_violation(err):
+            novo_id = write(
+                "INSERT INTO materiais(descricao, categoria, fabricante, dn, pn, material_fabricacao, status) VALUES(?,?,?,?,?,?,'Em revisão')",
+                (desc_limpa, cat_limpa, fab_limpo, dn_limpo, pn_limpo, mat_limpo)
+            )
+        else:
+            raise
     return int(novo_id), True
 
 
@@ -503,7 +668,9 @@ def obter_ou_criar_fornecedor(nome_fornecedor):
 def salvar_arquivo_anexo(arquivo, entidade_tipo, entidade_id, tipo_documento, observacoes="", fornecedor_id=None):
     ext = Path(arquivo.name).suffix.lower()
     nome_unico = f"{entidade_tipo}_{entidade_id}_{uuid.uuid4().hex[:8]}{ext}"
-    (ANEXOS_DIR / nome_unico).write_bytes(arquivo.getbuffer())
+    dados = bytes(arquivo.getbuffer())
+    mime = getattr(arquivo, "type", None) or "application/octet-stream"
+    storage_upload(nome_unico, dados, mime)
     write(
         """INSERT INTO anexos(entidade_tipo, entidade_id, fornecedor_id, tipo_documento,
            nome_original, arquivo_salvo, data_upload, observacoes) VALUES(?,?,?,?,?,?,?,?)""",
@@ -515,9 +682,7 @@ def salvar_arquivo_anexo(arquivo, entidade_tipo, entidade_id, tipo_documento, ob
 def remover_anexos_entidade(entidade_tipo, entidade_id):
     df_a = read("SELECT id, arquivo_salvo FROM anexos WHERE entidade_tipo=? AND entidade_id=?", (entidade_tipo, int(entidade_id)))
     for _, r in df_a.iterrows():
-        arq = ANEXOS_DIR / r["arquivo_salvo"]
-        if arq.exists():
-            arq.unlink()
+        storage_delete(r["arquivo_salvo"])
     write("DELETE FROM anexos WHERE entidade_tipo=? AND entidade_id=?", (entidade_tipo, int(entidade_id)))
 
 
@@ -600,14 +765,17 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     st.divider()
-    st.caption("RESUMO DO BANCO LOCAL")
+    st.caption("RESUMO DO BANCO")
     c_s1, c_s2 = st.columns(2)
     c_s1.metric("Materiais", int(tot_mat))
     c_s2.metric("Fornecedores", int(tot_forn))
     c_s3, c_s4 = st.columns(2)
     c_s3.metric("Cotações", int(tot_cot))
     c_s4.metric("Anexos", int(tot_ax))
-    st.caption("Armazenamento 100% local (central.db)")
+    if USAR_POSTGRES:
+        st.caption("☁️ Banco na nuvem (PostgreSQL)" + (" + Storage" if USAR_STORAGE else ""))
+    else:
+        st.caption("💻 Banco local (central.db)")
 
 
 # ==============================================================================
@@ -692,7 +860,7 @@ if menu == "🔍 Pesquisa & Catálogo":
                     df_h["Preço_Unit"] = df_h["Preço_Unit"].apply(fmt_brl)
                     st.dataframe(df_h, use_container_width=True, hide_index=True)
 
-                    cot_ids = tuple(hist_cot["cot_id"].unique().tolist())
+                    cot_ids = tuple(int(x) for x in hist_cot["cot_id"].unique().tolist())
                     ph = ",".join(["?"] * len(cot_ids))
                     anexos_orc = read(
                         f"""SELECT a.id, a.entidade_id, a.nome_original, a.arquivo_salvo, a.data_upload,
@@ -707,12 +875,12 @@ if menu == "🔍 Pesquisa & Catálogo":
                     if not anexos_orc.empty:
                         st.markdown("**Planilhas e propostas vinculadas**")
                         for _, ax_o in anexos_orc.iterrows():
-                            caminho_o = ANEXOS_DIR / ax_o["arquivo_salvo"]
                             c_o1, c_o2 = st.columns([4, 1])
                             forn_txt = f" | Fornecedor: **{ax_o['fornecedor_nome']}**" if ax_o["fornecedor_nome"] else ""
                             c_o1.write(f"📎 **{ax_o['nome_original']}** — {ax_o['processo'] or 'Cotação'}{forn_txt} ({ax_o['data_upload'] or ''})")
-                            if caminho_o.exists():
-                                c_o2.download_button("Baixar arquivo", data=caminho_o.read_bytes(), file_name=ax_o["nome_original"], key=f"dl_om_{m.id}_{ax_o['id']}")
+                            dados_o = storage_download(ax_o["arquivo_salvo"])
+                            if dados_o is not None:
+                                c_o2.download_button("Baixar arquivo", data=dados_o, file_name=ax_o["nome_original"], key=f"dl_om_{m.id}_{ax_o['id']}")
                 else:
                     st.caption("Sem cotações registradas para este material.")
 
@@ -722,11 +890,11 @@ if menu == "🔍 Pesquisa & Catálogo":
                     st.caption("Nenhum arquivo técnico anexado diretamente a este material.")
                 else:
                     for _, ax in anexos_mat.iterrows():
-                        caminho = ANEXOS_DIR / ax["arquivo_salvo"]
                         col_a, col_b = st.columns([4, 1])
                         col_a.write(f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax['data_upload'] or ''})")
-                        if caminho.exists():
-                            col_b.download_button("Baixar", data=caminho.read_bytes(), file_name=ax["nome_original"], key=f"dl_pm_{ax['id']}")
+                        dados_m = storage_download(ax["arquivo_salvo"])
+                        if dados_m is not None:
+                            col_b.download_button("Baixar", data=dados_m, file_name=ax["nome_original"], key=f"dl_pm_{ax['id']}")
 
 
 # ==============================================================================
@@ -790,8 +958,11 @@ elif menu == "📦 Materiais & Fornecedores":
                             )
                             st.success("Material cadastrado.")
                             st.rerun()
-                        except sqlite3.IntegrityError:
-                            st.error("Código interno já cadastrado.")
+                        except Exception as err:
+                            if _is_unique_violation(err):
+                                st.error("Código interno já cadastrado.")
+                            else:
+                                raise
 
         with sub_m_edit:
             mats = read("SELECT * FROM materiais ORDER BY id DESC")
@@ -833,8 +1004,11 @@ elif menu == "📦 Materiais & Fornecedores":
                         )
                         st.success("Material atualizado.")
                         st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("Código interno já pertence a outro material.")
+                    except Exception as err:
+                        if _is_unique_violation(err):
+                            st.error("Código interno já pertence a outro material.")
+                        else:
+                            raise
 
                 st.divider()
                 confirmar_del_mat = st.checkbox("Confirmo que desejo excluir permanentemente este material", key=f"del_mat_{mid_edit}")
@@ -958,7 +1132,7 @@ elif menu == "📦 Materiais & Fornecedores":
             if ok:
                 write(
                     "INSERT INTO fornecimentos(material_id,fornecedor_id,tipo_relacao,fabricante_ofertado,modelo_ofertado,data_interacao,observacoes) VALUES(?,?,?,?,?,?,?)",
-                    (mid, fid, tipo, fabricante, modelo, str(data), obs)
+                    (int(mid), int(fid), tipo, fabricante, modelo, str(data), obs)
                 )
                 st.success("Relação cadastrada.")
                 st.rerun()
@@ -1257,18 +1431,17 @@ elif menu == "💰 Cotações & Preços":
                 st.caption("Nenhum arquivo anexado a este orçamento.")
             else:
                 for _, ax_c in anexos_desta_cot.iterrows():
-                    caminho_c = ANEXOS_DIR / ax_c["arquivo_salvo"]
                     with st.container(border=True):
                         c_a1, c_a2, c_a3 = st.columns([4, 1, 1])
                         forn_label = f" • Fornecedor: **{ax_c['fornecedor_nome']}**" if ax_c["fornecedor_nome"] else ""
                         c_a1.write(f"**{ax_c['tipo_documento']}:** {ax_c['nome_original']}{forn_label} ({ax_c['data_upload'] or ''})")
                         if ax_c["observacoes"]:
                             c_a1.caption(ax_c["observacoes"])
-                        if caminho_c.exists():
-                            c_a2.download_button("Baixar", data=caminho_c.read_bytes(), file_name=ax_c["nome_original"], key=f"dl_ci_{ax_c['id']}")
+                        dados_c = storage_download(ax_c["arquivo_salvo"])
+                        if dados_c is not None:
+                            c_a2.download_button("Baixar", data=dados_c, file_name=ax_c["nome_original"], key=f"dl_ci_{ax_c['id']}")
                         if c_a3.button("Excluir", key=f"del_ci_{ax_c['id']}"):
-                            if caminho_c.exists():
-                                caminho_c.unlink()
+                            storage_delete(ax_c["arquivo_salvo"])
                             write("DELETE FROM anexos WHERE id=?", (int(ax_c["id"]),))
                             st.rerun()
 
@@ -1384,7 +1557,6 @@ else:
             st.info("Nenhum arquivo anexado encontrado.")
         else:
             for _, ax in df_ax.iterrows():
-                caminho = ANEXOS_DIR / ax["arquivo_salvo"]
                 if ax["entidade_tipo"] == "material":
                     vinculo_txt = f"Material: {ax['mat_nome'] or ax['entidade_id']}"
                 elif ax["entidade_tipo"] == "cotacao":
@@ -1395,11 +1567,11 @@ else:
                 with st.container(border=True):
                     c1, c2, c3 = st.columns([4, 1, 1])
                     c1.write(f"**{ax['tipo_documento']}** — **{ax['nome_original']}** ({ax['data_upload'] or ''})\n\n📌 _{vinculo_txt}_")
-                    if caminho.exists():
-                        c2.download_button("Baixar", data=caminho.read_bytes(), file_name=ax["nome_original"], key=f"dl_ax_{ax['id']}")
+                    dados_ax = storage_download(ax["arquivo_salvo"])
+                    if dados_ax is not None:
+                        c2.download_button("Baixar", data=dados_ax, file_name=ax["nome_original"], key=f"dl_ax_{ax['id']}")
                     if c3.button("Excluir", key=f"del_ax_{ax['id']}"):
-                        if caminho.exists():
-                            caminho.unlink()
+                        storage_delete(ax["arquivo_salvo"])
                         write("DELETE FROM anexos WHERE id=?", (int(ax["id"]),))
                         st.rerun()
 
@@ -1444,4 +1616,7 @@ else:
                 read(f"SELECT * FROM {tab_nome}").to_csv(index=False).encode("utf-8-sig"),
                 f"{tab_nome}.csv", "text/csv", use_container_width=True
             )
-        st.info("**Backup completo:** copie o arquivo `central.db` e a pasta `anexos/` da pasta do projeto.")
+        if USAR_POSTGRES:
+            st.info("**Banco na nuvem ativo:** os dados estão salvos no PostgreSQL e os anexos no Storage.")
+        else:
+            st.info("**Backup completo local:** copie o arquivo `central.db` e a pasta `anexos/` da pasta do projeto.")
