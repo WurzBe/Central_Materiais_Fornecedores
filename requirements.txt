@@ -2,3 +2,5 @@ streamlit>=1.35
 pandas>=2.0
 openpyxl
 pyxlsb
+psycopg2-binary
+requests
