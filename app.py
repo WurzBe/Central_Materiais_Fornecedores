@@ -584,7 +584,11 @@ elif page == "Relacionar fornecedor":
 
 elif page == "Cotações":
     st.header("Cotações")
-    aba_cot_lista, aba_cot_itens = st.tabs(["Cadastrar cotação", "Itens e preços da cotação"])
+    aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
+        "Cadastrar cotação",
+        "Itens e preços da cotação",
+        "Editar ou excluir"
+    ])
 
     with aba_cot_lista:
         with st.form("cot"):
@@ -603,7 +607,8 @@ elif page == "Cotações":
             st.success("Cotação criada.")
             st.rerun()
         st.subheader("Cotações registradas")
-        st.dataframe(read("SELECT * FROM cotacoes ORDER BY data_cotacao DESC, id DESC"), use_container_width=True, hide_index=True)
+        df_cots_reg = read("SELECT * FROM cotacoes ORDER BY data_cotacao DESC, id DESC")
+        st.dataframe(df_cots_reg, use_container_width=True, hide_index=True)
 
     with aba_cot_itens:
         cots = read("SELECT id, processo, data_cotacao, objeto, status FROM cotacoes ORDER BY data_cotacao DESC, id DESC")
@@ -700,6 +705,71 @@ elif page == "Cotações":
                     st.success("Item removido.")
                     st.rerun()
 
+    with aba_cot_editar:
+        cots_ed = read("SELECT * FROM cotacoes ORDER BY id DESC")
+        if cots_ed.empty:
+            st.info("Nenhuma cotação cadastrada para editar ou excluir.")
+        else:
+            st.dataframe(cots_ed, use_container_width=True, hide_index=True)
+
+            def label_cot_ed(i):
+                r = cots_ed.loc[cots_ed["id"] == i].iloc[0]
+                return f"ID {i} | {r['processo'] or 'Sem nº'} — {r['objeto'] or 'Sem objeto'} ({r['data_cotacao'] or ''})"
+
+            cid_edit = st.selectbox("Selecione a cotação pelo ID", cots_ed["id"].tolist(), format_func=label_cot_ed)
+            c_item = cots_ed[cots_ed["id"] == cid_edit].iloc[0]
+
+            try:
+                data_atual = date.fromisoformat(str(c_item["data_cotacao"]))
+            except ValueError:
+                data_atual = date.today()
+
+            status_cots = ["Em andamento", "Concluída", "Cancelada"]
+            with st.form("form_editar_cotacao"):
+                a, b = st.columns(2)
+                e_proc = a.text_input("Número do processo", value=c_item["processo"] or "")
+                e_data = b.date_input("Data", value=data_atual)
+                e_obj = a.text_input("Objeto", value=c_item["objeto"] or "")
+                e_status = b.selectbox("Status", status_cots, index=idx_opcao(status_cots, c_item["status"]))
+                e_obs = st.text_area("Observações", value=c_item["observacoes"] or "")
+                salvar_cot = st.form_submit_button("Salvar alterações")
+
+            if salvar_cot:
+                write(
+                    """UPDATE cotacoes SET
+                       processo=?, data_cotacao=?, objeto=?, status=?, observacoes=?
+                       WHERE id=?""",
+                    (e_proc.strip(), str(e_data), e_obj.strip(), e_status, e_obs.strip(), int(cid_edit))
+                )
+                st.success("Cotação atualizada com sucesso.")
+                st.rerun()
+
+            st.divider()
+            st.subheader("Excluir cotação")
+            qtd_itens_c = read(
+                "SELECT COUNT(*) AS total FROM cotacao_itens WHERE cotacao_id=?",
+                (int(cid_edit),)
+            )["total"].iloc[0]
+            qtd_ax_c = read(
+                "SELECT COUNT(*) AS total FROM anexos WHERE entidade_tipo='cotacao' AND entidade_id=?",
+                (int(cid_edit),)
+            )["total"].iloc[0]
+            if qtd_itens_c > 0 or qtd_ax_c > 0:
+                st.warning(f"Esta cotação possui {qtd_itens_c} item(ns) de preço e {qtd_ax_c} anexo(s) vinculado(s).")
+
+            confirmar_del_cot = st.checkbox(
+                "Confirmo que desejo excluir permanentemente esta cotação (e seus itens/anexos)",
+                key=f"del_cot_{cid_edit}"
+            )
+            if st.button("Excluir cotação selecionada", type="primary"):
+                if not confirmar_del_cot:
+                    st.error("Marque a caixa de confirmação antes de excluir.")
+                else:
+                    remover_anexos_entidade("cotacao", int(cid_edit))
+                    write("DELETE FROM cotacao_itens WHERE cotacao_id=?", (int(cid_edit),))
+                    write("DELETE FROM cotacoes WHERE id=?", (int(cid_edit),))
+                    st.success("Cotação excluída.")
+                    st.rerun()
 elif page == "Anexos":
     st.header("Anexos: Propostas, Catálogos e Fichas Técnicas")
     st.caption(f"Arquivos armazenados localmente em: {ANEXOS_DIR}")
