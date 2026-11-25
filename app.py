@@ -54,6 +54,7 @@ def init():
           id INTEGER PRIMARY KEY,
           entidade_tipo TEXT NOT NULL,
           entidade_id INTEGER NOT NULL,
+          fornecedor_id INTEGER,
           tipo_documento TEXT,
           nome_original TEXT NOT NULL,
           arquivo_salvo TEXT NOT NULL,
@@ -61,6 +62,10 @@ def init():
           observacoes TEXT
         );
         """)
+        try:
+            c.execute("ALTER TABLE anexos ADD COLUMN fornecedor_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
 
 
 def read(sql, params=()):
@@ -87,6 +92,29 @@ def idx_opcao(opcoes, valor):
 
 def fmt_brl(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def salvar_arquivo_anexo(arquivo, entidade_tipo, entidade_id, tipo_documento, observacoes="", fornecedor_id=None):
+    ext = Path(arquivo.name).suffix.lower()
+    nome_unico = f"{entidade_tipo}_{entidade_id}_{uuid.uuid4().hex[:8]}{ext}"
+    destino = ANEXOS_DIR / nome_unico
+    destino.write_bytes(arquivo.getbuffer())
+    write(
+        """INSERT INTO anexos(
+           entidade_tipo, entidade_id, fornecedor_id, tipo_documento,
+           nome_original, arquivo_salvo, data_upload, observacoes)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            entidade_tipo,
+            int(entidade_id),
+            int(fornecedor_id) if fornecedor_id else None,
+            tipo_documento,
+            arquivo.name,
+            nome_unico,
+            str(date.today()),
+            observacoes.strip()
+        )
+    )
 
 
 def remover_anexos_entidade(entidade_tipo, entidade_id):
@@ -172,9 +200,10 @@ ACIONAMENTOS = ["", "Manual", "Elétrico", "Pneumático", "Hidráulico", "Sem ac
 APLICACOES = ["", "Água potável", "Esgoto", "Drenagem", "Industrial", "Outra"]
 STATUS_MAT = ["Em revisão", "Validado", "Inativo"]
 TIPOS_DOC = [
-    "Ficha técnica", "Catálogo", "Proposta comercial",
+    "Proposta comercial / Orçamento", "Ficha técnica", "Catálogo",
     "Desenho técnico", "Certificado / Norma", "Outro"
 ]
+EXTENSOES_ACEITAS = ["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc", "csv", "txt"]
 
 st.set_page_config(page_title="Central de Materiais e Fornecedores", page_icon="🧰", layout="wide")
 init()
@@ -278,8 +307,8 @@ if menu == "🔍 Pesquisa & Catálogo":
 
             t_forn, t_prec, t_doc = st.tabs([
                 "🏢 Fornecedores vinculados",
-                "💲 Histórico de preços",
-                "📄 Documentos anexados"
+                "💲 Histórico de preços & Orçamentos",
+                "📄 Documentos técnicos"
             ])
 
             with t_forn:
@@ -298,8 +327,8 @@ if menu == "🔍 Pesquisa & Catálogo":
 
             with t_prec:
                 hist_cot = read(
-                    """SELECT c.data_cotacao AS Data, c.processo AS Processo,
-                              f.razao_social AS Fornecedor, ci.quantidade AS Qtd,
+                    """SELECT c.id AS cot_id, c.data_cotacao AS Data, c.processo AS Processo,
+                              f.id AS forn_id, f.razao_social AS Fornecedor, ci.quantidade AS Qtd,
                               ci.unidade AS Unid, ci.preco_unitario AS Preço_Unit,
                               ci.prazo_entrega AS Prazo, ci.observacoes AS Obs
                        FROM cotacao_itens ci
@@ -310,8 +339,40 @@ if menu == "🔍 Pesquisa & Catálogo":
                     (int(m.id),)
                 )
                 if not hist_cot.empty:
-                    hist_cot["Preço_Unit"] = hist_cot["Preço_Unit"].apply(fmt_brl)
-                    st.dataframe(hist_cot, use_container_width=True, hide_index=True)
+                    df_h = hist_cot.drop(columns=["cot_id", "forn_id"]).copy()
+                    df_h["Preço_Unit"] = df_h["Preço_Unit"].apply(fmt_brl)
+                    st.dataframe(df_h, use_container_width=True, hide_index=True)
+
+                    cot_ids = tuple(hist_cot["cot_id"].unique().tolist())
+                    placeholders = ",".join(["?"] * len(cot_ids))
+                    anexos_orc = read(
+                        f"""SELECT a.id, a.entidade_id, a.tipo_documento, a.nome_original,
+                                   a.arquivo_salvo, a.data_upload, a.observacoes,
+                                   c.processo, f.razao_social AS fornecedor_nome
+                            FROM anexos a
+                            LEFT JOIN cotacoes c ON c.id = a.entidade_id
+                            LEFT JOIN fornecedores f ON f.id = a.fornecedor_id
+                            WHERE a.entidade_tipo='cotacao' AND a.entidade_id IN ({placeholders})
+                            ORDER BY a.id DESC""",
+                        cot_ids
+                    )
+                    if not anexos_orc.empty:
+                        st.markdown("**Orçamentos / Propostas das cotações acima**")
+                        for _, ax_o in anexos_orc.iterrows():
+                            caminho_o = ANEXOS_DIR / ax_o["arquivo_salvo"]
+                            c_o1, c_o2 = st.columns([4, 1])
+                            forn_txt = f" | Fornecedor: **{ax_o['fornecedor_nome']}**" if ax_o["fornecedor_nome"] else ""
+                            proc_txt = ax_o["processo"] or f"Cotação #{ax_o['entidade_id']}"
+                            c_o1.write(
+                                f"📎 **{ax_o['nome_original']}** — Processo: {proc_txt}{forn_txt} ({ax_o['data_upload'] or ''})"
+                            )
+                            if caminho_o.exists():
+                                c_o2.download_button(
+                                    "Baixar orçamento",
+                                    data=caminho_o.read_bytes(),
+                                    file_name=ax_o["nome_original"],
+                                    key=f"dl_orc_mat_{m.id}_{ax_o['id']}"
+                                )
                 else:
                     st.caption("Sem cotações registradas para este material.")
 
@@ -322,7 +383,7 @@ if menu == "🔍 Pesquisa & Catálogo":
                     (int(m.id),)
                 )
                 if anexos_mat.empty:
-                    st.caption("Nenhum arquivo anexado a este material.")
+                    st.caption("Nenhum arquivo técnico anexado diretamente a este material.")
                 else:
                     for _, ax in anexos_mat.iterrows():
                         caminho = ANEXOS_DIR / ax["arquivo_salvo"]
@@ -355,7 +416,6 @@ elif menu == "📦 Materiais & Fornecedores":
         "🔗 Vincular Material x Fornecedor"
     ])
 
-    # --- SUB-SEÇÃO: MATERIAIS ---
     with sec_mat:
         sub_m_novo, sub_m_edit = st.tabs(["Cadastrar novo material", "Editar ou excluir material"])
 
@@ -526,7 +586,6 @@ elif menu == "📦 Materiais & Fornecedores":
                         st.success("Material excluído.")
                         st.rerun()
 
-    # --- SUB-SEÇÃO: FORNECEDORES ---
     with sec_forn:
         sub_f_novo, sub_f_edit = st.tabs(["Cadastrar novo fornecedor", "Editar ou excluir fornecedor"])
 
@@ -667,7 +726,6 @@ elif menu == "📦 Materiais & Fornecedores":
                         st.success("Fornecedor excluído.")
                         st.rerun()
 
-    # --- SUB-SEÇÃO: VÍNCULOS ---
     with sec_vinc:
         ms = read("SELECT id,descricao,dn FROM materiais ORDER BY descricao")
         fs = read("SELECT id,razao_social FROM fornecedores ORDER BY razao_social")
@@ -722,11 +780,11 @@ elif menu == "📦 Materiais & Fornecedores":
 # ==============================================================================
 elif menu == "💰 Cotações & Preços":
     st.title("Cotações & Histórico de Preços")
-    st.caption("Gerencie processos de cotação, lance propostas por fornecedor e acompanhe valores.")
+    st.caption("Gerencie processos de cotação, lance propostas por fornecedor e anexe os orçamentos.")
 
     aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
         "📋 Cadastrar cotação",
-        "💲 Itens e preços",
+        "💲 Itens, preços & Orçamentos",
         "✏️ Editar ou excluir"
     ])
 
@@ -789,6 +847,11 @@ elif menu == "💰 Cotações & Preços":
                 preco = c3.number_input("Preço unitário (R$) *", min_value=0.0, value=0.0, step=10.0, format="%.2f")
                 prazo = c4.text_input("Prazo de entrega", placeholder="Ex.: 15 dias úteis")
                 obs_item = st.text_input("Observações do item (frete, impostos, marca ofertada)")
+                arq_orc_item = st.file_uploader(
+                    "Anexar proposta / orçamento deste fornecedor (opcional)",
+                    type=EXTENSOES_ACEITAS,
+                    key="up_orc_junto_item"
+                )
                 add_item = st.form_submit_button("Adicionar preço à cotação", type="primary")
 
             if add_item:
@@ -805,6 +868,15 @@ elif menu == "💰 Cotações & Preços":
                             unid.strip() or "un", float(preco), prazo.strip(), obs_item.strip()
                         )
                     )
+                    if arq_orc_item is not None:
+                        salvar_arquivo_anexo(
+                            arq_orc_item,
+                            entidade_tipo="cotacao",
+                            entidade_id=int(cid),
+                            tipo_documento="Proposta comercial / Orçamento",
+                            observacoes=obs_item.strip(),
+                            fornecedor_id=int(fid_c)
+                        )
                     st.success("Item e preço adicionados à cotação.")
                     st.rerun()
 
@@ -844,6 +916,78 @@ elif menu == "💰 Cotações & Preços":
                     write("DELETE FROM cotacao_itens WHERE id=?", (int(item_del),))
                     st.success("Item removido.")
                     st.rerun()
+
+            st.divider()
+            st.subheader("📎 Orçamentos e propostas anexados a esta cotação")
+
+            with st.expander("➕ Anexar proposta comercial / orçamento avulso nesta cotação"):
+                with st.form("form_anexo_direto_cot"):
+                    opcoes_forn_ax = [0] + fs["id"].tolist()
+
+                    def label_forn_ax(i):
+                        if i == 0:
+                            return "Geral da cotação (sem fornecedor específico)"
+                        return fs.loc[fs["id"] == i, "razao_social"].iloc[0]
+
+                    col_ax1, col_ax2 = st.columns(2)
+                    fid_ax = col_ax1.selectbox("Fornecedor do orçamento", opcoes_forn_ax, format_func=label_forn_ax)
+                    tipo_ax_cot = col_ax2.selectbox("Tipo de arquivo", TIPOS_DOC)
+                    arq_cot_avulso = st.file_uploader("Selecione o arquivo do orçamento", type=EXTENSOES_ACEITAS)
+                    obs_ax_cot = st.text_input("Observações (ex.: Proposta nº 123, validade 10 dias)")
+                    btn_ax_cot = st.form_submit_button("Salvar orçamento na cotação")
+
+                if btn_ax_cot:
+                    if arq_cot_avulso is None:
+                        st.error("Selecione um arquivo antes de salvar.")
+                    else:
+                        salvar_arquivo_anexo(
+                            arq_cot_avulso,
+                            entidade_tipo="cotacao",
+                            entidade_id=int(cid),
+                            tipo_documento=tipo_ax_cot,
+                            observacoes=obs_ax_cot,
+                            fornecedor_id=int(fid_ax) if fid_ax != 0 else None
+                        )
+                        st.success("Orçamento anexado à cotação!")
+                        st.rerun()
+
+            anexos_desta_cot = read(
+                """SELECT a.id, a.tipo_documento, a.nome_original, a.arquivo_salvo,
+                          a.data_upload, a.observacoes, f.razao_social AS fornecedor_nome
+                   FROM anexos a
+                   LEFT JOIN fornecedores f ON f.id = a.fornecedor_id
+                   WHERE a.entidade_tipo='cotacao' AND a.entidade_id=?
+                   ORDER BY a.id DESC""",
+                (int(cid),)
+            )
+
+            if anexos_desta_cot.empty:
+                st.caption("Nenhum arquivo de orçamento anexado a esta cotação ainda.")
+            else:
+                for _, ax_c in anexos_desta_cot.iterrows():
+                    caminho_c = ANEXOS_DIR / ax_c["arquivo_salvo"]
+                    with st.container(border=True):
+                        c_a1, c_a2, c_a3 = st.columns([4, 1, 1])
+                        forn_label = f" • Fornecedor: **{ax_c['fornecedor_nome']}**" if ax_c["fornecedor_nome"] else ""
+                        c_a1.write(
+                            f"**{ax_c['tipo_documento']}:** {ax_c['nome_original']}{forn_label} ({ax_c['data_upload'] or ''})"
+                        )
+                        if ax_c["observacoes"]:
+                            c_a1.caption(ax_c["observacoes"])
+                        if caminho_c.exists():
+                            c_a2.download_button(
+                                "Baixar",
+                                data=caminho_c.read_bytes(),
+                                file_name=ax_c["nome_original"],
+                                key=f"dl_cot_inline_{ax_c['id']}"
+                            )
+                        else:
+                            c_a2.caption("Ausente")
+                        if c_a3.button("Excluir", key=f"del_cot_inline_{ax_c['id']}"):
+                            if caminho_c.exists():
+                                caminho_c.unlink()
+                            write("DELETE FROM anexos WHERE id=?", (int(ax_c["id"]),))
+                            st.rerun()
 
     with aba_cot_editar:
         cots_ed = read("SELECT * FROM cotacoes ORDER BY id DESC")
@@ -917,21 +1061,100 @@ elif menu == "💰 Cotações & Preços":
 # ==============================================================================
 else:
     st.title("Anexos & Exportação de Dados")
-    st.caption("Gerencie catálogos, fichas técnicas, propostas comerciais e cópias de segurança.")
+    st.caption("Gerencie todos os documentos técnicos, propostas comerciais e cópias de segurança.")
 
-    aba_up, aba_lista, aba_exp = st.tabs([
-        "📤 Enviar novo arquivo",
-        "📂 Consultar anexos",
+    aba_lista, aba_up, aba_exp = st.tabs([
+        "📂 Todos os documentos anexados",
+        "📤 Enviar anexo avulso",
         "💾 Exportar CSV & Backup"
     ])
+
+    with aba_lista:
+        filtro_t = st.selectbox(
+            "Filtrar por vínculo",
+            ["Todos", "cotacao", "material", "fornecedor"],
+            format_func=lambda t: {
+                "Todos": "Todos os anexos",
+                "cotacao": "Cotações / Orçamentos",
+                "material": "Materiais (Fichas e Catálogos)",
+                "fornecedor": "Fornecedores"
+            }[t]
+        )
+        if filtro_t == "Todos":
+            df_ax = read("""
+                SELECT a.*,
+                       m.descricao AS mat_nome,
+                       c.processo AS cot_proc, c.objeto AS cot_obj,
+                       f_ent.razao_social AS forn_ent_nome,
+                       f_orc.razao_social AS forn_orc_nome
+                FROM anexos a
+                LEFT JOIN materiais m ON a.entidade_tipo='material' AND m.id = a.entidade_id
+                LEFT JOIN cotacoes c ON a.entidade_tipo='cotacao' AND c.id = a.entidade_id
+                LEFT JOIN fornecedores f_ent ON a.entidade_tipo='fornecedor' AND f_ent.id = a.entidade_id
+                LEFT JOIN fornecedores f_orc ON f_orc.id = a.fornecedor_id
+                ORDER BY a.id DESC
+            """)
+        else:
+            df_ax = read("""
+                SELECT a.*,
+                       m.descricao AS mat_nome,
+                       c.processo AS cot_proc, c.objeto AS cot_obj,
+                       f_ent.razao_social AS forn_ent_nome,
+                       f_orc.razao_social AS forn_orc_nome
+                FROM anexos a
+                LEFT JOIN materiais m ON a.entidade_tipo='material' AND m.id = a.entidade_id
+                LEFT JOIN cotacoes c ON a.entidade_tipo='cotacao' AND c.id = a.entidade_id
+                LEFT JOIN fornecedores f_ent ON a.entidade_tipo='fornecedor' AND f_ent.id = a.entidade_id
+                LEFT JOIN fornecedores f_orc ON f_orc.id = a.fornecedor_id
+                WHERE a.entidade_tipo=?
+                ORDER BY a.id DESC
+            """, (filtro_t,))
+
+        if df_ax.empty:
+            st.info("Nenhum arquivo anexado encontrado.")
+        else:
+            for _, ax in df_ax.iterrows():
+                caminho = ANEXOS_DIR / ax["arquivo_salvo"]
+                if ax["entidade_tipo"] == "material":
+                    vinculo_txt = f"Material: {ax['mat_nome'] or 'ID ' + str(ax['entidade_id'])}"
+                elif ax["entidade_tipo"] == "cotacao":
+                    proc_s = ax["cot_proc"] or f"ID {ax['entidade_id']}"
+                    obj_s = f" ({ax['cot_obj']})" if ax["cot_obj"] else ""
+                    forn_s = f" • Fornecedor: {ax['forn_orc_nome']}" if ax["forn_orc_nome"] else ""
+                    vinculo_txt = f"Cotação: {proc_s}{obj_s}{forn_s}"
+                else:
+                    vinculo_txt = f"Fornecedor: {ax['forn_ent_nome'] or 'ID ' + str(ax['entidade_id'])}"
+
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([4, 1, 1])
+                    c1.write(
+                        f"**{ax['tipo_documento']}** — **{ax['nome_original']}** ({ax['data_upload'] or ''})\n\n"
+                        f"📌 _{vinculo_txt}_"
+                    )
+                    if ax["observacoes"]:
+                        c1.caption(f"Obs.: {ax['observacoes']}")
+                    if caminho.exists():
+                        c2.download_button(
+                            "Baixar",
+                            data=caminho.read_bytes(),
+                            file_name=ax["nome_original"],
+                            key=f"dl_tab_ax_{ax['id']}"
+                        )
+                    else:
+                        c2.caption("Ausente")
+                    if c3.button("Excluir", key=f"del_tab_ax_{ax['id']}"):
+                        if caminho.exists():
+                            caminho.unlink()
+                        write("DELETE FROM anexos WHERE id=?", (int(ax["id"]),))
+                        st.rerun()
 
     with aba_up:
         tipo_entidade = st.selectbox(
             "Vincular arquivo a:",
-            ["material", "cotacao", "fornecedor"],
+            ["cotacao", "material", "fornecedor"],
             format_func=lambda t: {
+                "cotacao": "Cotação / Orçamento (proposta comercial)",
                 "material": "Material (ficha técnica / catálogo)",
-                "cotacao": "Cotação (proposta comercial)",
                 "fornecedor": "Fornecedor (portfólio / certificado)"
             }[t]
         )
@@ -955,16 +1178,23 @@ else:
                 opcoes_ids.append(int(r["id"]))
                 mapa_labels[int(r["id"])] = f"ID {r['id']} — {r['razao_social']}"
 
+        fs_up = read("SELECT id, razao_social FROM fornecedores ORDER BY razao_social")
+
         if not opcoes_ids:
             st.info("Cadastre primeiro um registro desse tipo antes de anexar arquivos.")
         else:
             with st.form("form_upload_anexo"):
                 ent_id = st.selectbox("Selecione o registro *", opcoes_ids, format_func=lambda i: mapa_labels[i])
+                fid_up_sel = None
+                if tipo_entidade == "cotacao" and not fs_up.empty:
+                    op_f_up = [0] + fs_up["id"].tolist()
+                    fid_up_sel = st.selectbox(
+                        "Fornecedor deste orçamento (opcional)",
+                        op_f_up,
+                        format_func=lambda i: "Não especificar" if i == 0 else fs_up.loc[fs_up["id"] == i, "razao_social"].iloc[0]
+                    )
                 tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC)
-                arquivo = st.file_uploader(
-                    "Escolha o arquivo (PDF, imagem, Excel, Word, etc.)",
-                    type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc", "csv", "txt"]
-                )
+                arquivo = st.file_uploader("Escolha o arquivo", type=EXTENSOES_ACEITAS)
                 obs_ax = st.text_input("Observações sobre o arquivo")
                 enviar_ax = st.form_submit_button("Salvar anexo", type="primary")
 
@@ -972,66 +1202,16 @@ else:
                 if arquivo is None:
                     st.error("Selecione um arquivo antes de salvar.")
                 else:
-                    ext = Path(arquivo.name).suffix.lower()
-                    nome_unico = f"{tipo_entidade}_{ent_id}_{uuid.uuid4().hex[:8]}{ext}"
-                    destino = ANEXOS_DIR / nome_unico
-                    destino.write_bytes(arquivo.getbuffer())
-                    write(
-                        """INSERT INTO anexos(
-                           entidade_tipo, entidade_id, tipo_documento,
-                           nome_original, arquivo_salvo, data_upload, observacoes)
-                           VALUES(?,?,?,?,?,?,?)""",
-                        (
-                            tipo_entidade, int(ent_id), tipo_doc,
-                            arquivo.name, nome_unico, str(date.today()), obs_ax.strip()
-                        )
+                    salvar_arquivo_anexo(
+                        arquivo,
+                        entidade_tipo=tipo_entidade,
+                        entidade_id=int(ent_id),
+                        tipo_documento=tipo_doc,
+                        observacoes=obs_ax,
+                        fornecedor_id=int(fid_up_sel) if fid_up_sel and fid_up_sel != 0 else None
                     )
                     st.success(f"Arquivo '{arquivo.name}' salvo com sucesso.")
                     st.rerun()
-
-    with aba_lista:
-        filtro_t = st.selectbox(
-            "Filtrar por vínculo",
-            ["Todos", "material", "cotacao", "fornecedor"],
-            format_func=lambda t: {
-                "Todos": "Todos os anexos",
-                "material": "Materiais",
-                "cotacao": "Cotações",
-                "fornecedor": "Fornecedores"
-            }[t]
-        )
-        if filtro_t == "Todos":
-            df_ax = read("SELECT * FROM anexos ORDER BY id DESC")
-        else:
-            df_ax = read("SELECT * FROM anexos WHERE entidade_tipo=? ORDER BY id DESC", (filtro_t,))
-
-        if df_ax.empty:
-            st.info("Nenhum arquivo anexado encontrado.")
-        else:
-            for _, ax in df_ax.iterrows():
-                caminho = ANEXOS_DIR / ax["arquivo_salvo"]
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([4, 1, 1])
-                    c1.write(
-                        f"**[{ax['entidade_tipo'].upper()} ID {ax['entidade_id']}]** "
-                        f"{ax['tipo_documento']} — **{ax['nome_original']}** ({ax['data_upload'] or ''})"
-                    )
-                    if ax["observacoes"]:
-                        c1.caption(ax["observacoes"])
-                    if caminho.exists():
-                        c2.download_button(
-                            "Baixar",
-                            data=caminho.read_bytes(),
-                            file_name=ax["nome_original"],
-                            key=f"dl_tab_ax_{ax['id']}"
-                        )
-                    else:
-                        c2.caption("Ausente")
-                    if c3.button("Excluir", key=f"del_tab_ax_{ax['id']}"):
-                        if caminho.exists():
-                            caminho.unlink()
-                        write("DELETE FROM anexos WHERE id=?", (int(ax["id"]),))
-                        st.rerun()
 
     with aba_exp:
         st.subheader("Exportar tabelas em CSV")
