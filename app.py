@@ -104,6 +104,61 @@ def remover_anexos_entidade(entidade_tipo, entidade_id):
     )
 
 
+def aplicar_estilo():
+    st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 1.8rem;
+            padding-bottom: 2rem;
+            max-width: 1200px;
+        }
+        [data-testid="stSidebar"] {
+            border-right: 1px solid rgba(128, 128, 128, 0.2);
+        }
+        [data-testid="stSidebar"] .stRadio > div {
+            gap: 0.35rem;
+        }
+        [data-testid="stSidebar"] .stRadio label {
+            background-color: rgba(128, 128, 128, 0.08);
+            padding: 0.6rem 0.85rem;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: all 0.15s ease;
+            cursor: pointer;
+            width: 100%;
+        }
+        [data-testid="stSidebar"] .stRadio label:hover {
+            background-color: rgba(128, 128, 128, 0.16);
+            border-color: rgba(128, 128, 128, 0.3);
+        }
+        [data-testid="stSidebar"] .stRadio label > div:first-child {
+            display: none;
+        }
+        [data-testid="stMetric"] {
+            background-color: rgba(128, 128, 128, 0.07);
+            padding: 0.8rem 1rem;
+            border-radius: 10px;
+            border: 1px solid rgba(128, 128, 128, 0.18);
+        }
+        .sidebar-brand {
+            padding: 0.4rem 0 0.8rem 0;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+            margin-bottom: 1rem;
+        }
+        .sidebar-brand h2 {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+        .sidebar-brand p {
+            margin: 0.2rem 0 0 0;
+            font-size: 0.8rem;
+            opacity: 0.75;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 CATEGORIAS = [
     "", "Tubos", "Conexões", "Válvulas", "Atuadores",
     "Medidores", "Bombas", "Materiais elétricos", "Instrumentação", "Outros"
@@ -123,27 +178,63 @@ TIPOS_DOC = [
 
 st.set_page_config(page_title="Central de Materiais e Fornecedores", page_icon="🧰", layout="wide")
 init()
-st.title("Central de Materiais e Fornecedores")
-st.caption("Protótipo local • banco central.db e arquivos na pasta anexos/")
+aplicar_estilo()
 
-paginas = [
-    "Pesquisa", "Cadastrar material", "Fornecedores",
-    "Relacionar fornecedor", "Cotações", "Anexos", "Exportar"
-]
-page = st.sidebar.radio("Navegação", paginas)
-st.sidebar.info("Versão local (custo zero). Para backup completo, copie central.db e a pasta anexos/.")
+tot_mat = read("SELECT COUNT(*) AS n FROM materiais")["n"].iloc[0]
+tot_forn = read("SELECT COUNT(*) AS n FROM fornecedores")["n"].iloc[0]
+tot_cot = read("SELECT COUNT(*) AS n FROM cotacoes")["n"].iloc[0]
+tot_ax = read("SELECT COUNT(*) AS n FROM anexos")["n"].iloc[0]
 
-if page == "Pesquisa":
-    st.header("Pesquisar materiais")
-    a, b, c = st.columns([3, 1, 1])
-    q = a.text_input("Descrição, código, fabricante ou palavra-chave", "")
-    df_cats = read(
-        "SELECT DISTINCT categoria FROM materiais "
-        "WHERE categoria IS NOT NULL AND categoria<>'' ORDER BY categoria"
+with st.sidebar:
+    st.markdown("""
+    <div class="sidebar-brand">
+        <h2>🧰 Central de Suprimentos</h2>
+        <p>Materiais, Fornecedores & Cotações</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    menu = st.radio(
+        "Menu principal",
+        [
+            "🔍 Pesquisa & Catálogo",
+            "📦 Materiais & Fornecedores",
+            "💰 Cotações & Preços",
+            "📎 Anexos & Backup",
+        ],
+        label_visibility="collapsed"
     )
-    cats = ["Todas"] + df_cats["categoria"].tolist()
-    cat = b.selectbox("Categoria", cats)
-    dn = c.text_input("DN")
+
+    st.divider()
+    st.caption("RESUMO DO BANCO LOCAL")
+    c_s1, c_s2 = st.columns(2)
+    c_s1.metric("Materiais", int(tot_mat))
+    c_s2.metric("Fornecedores", int(tot_forn))
+    c_s3, c_s4 = st.columns(2)
+    c_s3.metric("Cotações", int(tot_cot))
+    c_s4.metric("Anexos", int(tot_ax))
+    st.caption("Armazenamento 100% local (central.db)")
+
+
+# ==============================================================================
+# 1. PESQUISA & CATÁLOGO
+# ==============================================================================
+if menu == "🔍 Pesquisa & Catálogo":
+    st.title("Pesquisa & Catálogo Técnico")
+    st.caption("Consulte especificações, fornecedores homologados, histórico de preços e documentos.")
+
+    with st.container(border=True):
+        a, b, c = st.columns([3, 1.2, 0.8])
+        q = a.text_input(
+            "Buscar material",
+            placeholder="Digite descrição, código, fabricante, modelo ou palavra-chave..."
+        )
+        df_cats = read(
+            "SELECT DISTINCT categoria FROM materiais "
+            "WHERE categoria IS NOT NULL AND categoria<>'' ORDER BY categoria"
+        )
+        cats = ["Todas"] + df_cats["categoria"].tolist()
+        cat = b.selectbox("Categoria", cats)
+        dn = c.text_input("DN", placeholder="Ex.: 400")
 
     sql = "SELECT * FROM materiais WHERE 1=1"
     p = []
@@ -161,12 +252,17 @@ if page == "Pesquisa":
         p.append(dn.strip())
 
     rows = read(sql + " ORDER BY descricao", p)
-    st.caption(f"{len(rows)} resultado(s)")
+    st.caption(f"Exibindo **{len(rows)}** material(is) encontrado(s)")
+
     if rows.empty:
-        st.info("Nenhum material encontrado. Cadastre materiais para começar a formar o catálogo.")
+        st.info("Nenhum material encontrado com esses filtros. Cadastre novos itens em 'Materiais & Fornecedores'.")
 
     for _, m in rows.iterrows():
-        titulo = f"{m.descricao} | {m.categoria or 'Sem categoria'} | DN {m.dn or '—'} | PN {m.pn or '—'}"
+        badge_status = "🟢" if m.status == "Validado" else ("🟡" if m.status == "Em revisão" else "⚪")
+        titulo = (
+            f"{badge_status} {m.descricao}  •  "
+            f"{m.categoria or 'Sem categoria'}  |  DN {m.dn or '—'}  |  PN {m.pn or '—'}"
+        )
         with st.expander(titulo):
             x, y = st.columns(2)
             x.write(f"**Código interno:** {m.codigo or 'Não informado'}")
@@ -177,417 +273,461 @@ if page == "Pesquisa":
             y.write(f"**Conexão:** {m.tipo_conexao or 'Não informado'}")
             y.write(f"**Aplicação:** {m.aplicacao or 'Não informado'}")
             y.write(f"**Status:** {m.status}")
-            st.write(m.descricao_tecnica or "")
+            if m.descricao_tecnica:
+                st.info(m.descricao_tecnica)
 
-            rel = read(
-                """SELECT f.razao_social AS Fornecedor, r.tipo_relacao AS Relação,
-                          r.fabricante_ofertado AS Fabricante, r.modelo_ofertado AS Modelo,
-                          r.data_interacao AS Data
-                   FROM fornecimentos r JOIN fornecedores f ON f.id=r.fornecedor_id
-                   WHERE r.material_id=? ORDER BY r.data_interacao DESC""",
-                (int(m.id),)
-            )
-            st.markdown("**Fornecedores relacionados**")
-            if not rel.empty:
-                st.dataframe(rel, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Sem fornecedores relacionados.")
+            t_forn, t_prec, t_doc = st.tabs([
+                "🏢 Fornecedores vinculados",
+                "💲 Histórico de preços",
+                "📄 Documentos anexados"
+            ])
 
-            hist_cot = read(
-                """SELECT c.data_cotacao AS Data, c.processo AS Processo,
-                          f.razao_social AS Fornecedor, ci.quantidade AS Qtd,
-                          ci.unidade AS Unid, ci.preco_unitario AS Preço_Unit,
-                          ci.prazo_entrega AS Prazo, ci.observacoes AS Obs
-                   FROM cotacao_itens ci
-                   JOIN cotacoes c ON c.id = ci.cotacao_id
-                   JOIN fornecedores f ON f.id = ci.fornecedor_id
-                   WHERE ci.material_id=?
-                   ORDER BY c.data_cotacao DESC, ci.preco_unitario ASC""",
-                (int(m.id),)
-            )
-            st.markdown("**Histórico de cotações e preços**")
-            if not hist_cot.empty:
-                hist_cot["Preço_Unit"] = hist_cot["Preço_Unit"].apply(fmt_brl)
-                st.dataframe(hist_cot, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Sem cotações registradas para este material.")
-
-            anexos_mat = read(
-                "SELECT id, tipo_documento, nome_original, arquivo_salvo, data_upload, observacoes "
-                "FROM anexos WHERE entidade_tipo='material' AND entidade_id=? ORDER BY id DESC",
-                (int(m.id),)
-            )
-            st.markdown("**Documentos e fichas técnicas anexadas**")
-            if anexos_mat.empty:
-                st.caption("Nenhum arquivo anexado a este material.")
-            else:
-                for _, ax in anexos_mat.iterrows():
-                    caminho = ANEXOS_DIR / ax["arquivo_salvo"]
-                    col_a, col_b = st.columns([4, 1])
-                    info_ax = f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax['data_upload'] or ''})"
-                    if ax["observacoes"]:
-                        info_ax += f" — _{ax['observacoes']}_"
-                    col_a.write(info_ax)
-                    if caminho.exists():
-                        col_b.download_button(
-                            "Baixar",
-                            data=caminho.read_bytes(),
-                            file_name=ax["nome_original"],
-                            key=f"dl_pesq_mat_{ax['id']}"
-                        )
-                    else:
-                        col_b.caption("Arquivo ausente")
-
-elif page == "Cadastrar material":
-    st.header("Materiais")
-    aba_novo, aba_editar = st.tabs(["Cadastrar novo", "Editar ou excluir"])
-
-    with aba_novo:
-        with st.form("material"):
-            a, b = st.columns(2)
-            descricao = a.text_input("Descrição *")
-            codigo = b.text_input("Código interno")
-            categoria = a.selectbox("Categoria", CATEGORIAS)
-            sub = b.text_input("Subcategoria")
-            fab = a.text_input("Fabricante")
-            modelo = b.text_input("Modelo")
-            codfab = a.text_input("Código do fabricante")
-            dn = b.text_input("DN")
-            pn = a.text_input("PN")
-            mat = b.selectbox("Material de fabricação", MATERIAIS_FAB)
-            conex = a.selectbox("Tipo de conexão", CONEXOES)
-            ac = b.selectbox("Acionamento", ACIONAMENTOS)
-            aplic = a.selectbox("Aplicação", APLICACOES)
-            palavras = st.text_input("Palavras-chave (separadas por vírgula)")
-            desc = st.text_area("Descrição técnica / observações")
-            status = st.selectbox("Status", STATUS_MAT)
-            forcar_similar = st.checkbox("Confirmar cadastro mesmo existindo material com descrição igual")
-            ok = st.form_submit_button("Salvar material")
-
-        if ok:
-            if not descricao.strip():
-                st.error("Descrição é obrigatória.")
-            else:
-                existentes = read("SELECT id, codigo, descricao, fabricante, modelo, dn, pn, status FROM materiais")
-                desc_n, fab_n, mod_n, dn_n = norm(descricao), norm(fab), norm(modelo), norm(dn)
-
-                if not existentes.empty:
-                    duplicados_exatos = existentes[
-                        existentes.apply(
-                            lambda r: norm(r["descricao"]) == desc_n
-                            and norm(r["fabricante"]) == fab_n
-                            and norm(r["modelo"]) == mod_n
-                            and norm(r["dn"]) == dn_n,
-                            axis=1,
-                        )
-                    ]
-                    mesma_descricao = existentes[
-                        existentes.apply(lambda r: norm(r["descricao"]) == desc_n, axis=1)
-                    ]
+            with t_forn:
+                rel = read(
+                    """SELECT f.razao_social AS Fornecedor, r.tipo_relacao AS Relação,
+                              r.fabricante_ofertado AS Fabricante, r.modelo_ofertado AS Modelo,
+                              r.data_interacao AS Data
+                       FROM fornecimentos r JOIN fornecedores f ON f.id=r.fornecedor_id
+                       WHERE r.material_id=? ORDER BY r.data_interacao DESC""",
+                    (int(m.id),)
+                )
+                if not rel.empty:
+                    st.dataframe(rel, use_container_width=True, hide_index=True)
                 else:
-                    duplicados_exatos = pd.DataFrame()
-                    mesma_descricao = pd.DataFrame()
+                    st.caption("Sem fornecedores relacionados a este material.")
 
-                if not duplicados_exatos.empty:
-                    st.error("Este material já está cadastrado com os mesmos dados:")
-                    st.dataframe(duplicados_exatos, use_container_width=True, hide_index=True)
-                elif not mesma_descricao.empty and not forcar_similar:
-                    st.warning("Já existe material com essa descrição. Marque a caixa de confirmação se for variação válida:")
-                    st.dataframe(mesma_descricao, use_container_width=True, hide_index=True)
+            with t_prec:
+                hist_cot = read(
+                    """SELECT c.data_cotacao AS Data, c.processo AS Processo,
+                              f.razao_social AS Fornecedor, ci.quantidade AS Qtd,
+                              ci.unidade AS Unid, ci.preco_unitario AS Preço_Unit,
+                              ci.prazo_entrega AS Prazo, ci.observacoes AS Obs
+                       FROM cotacao_itens ci
+                       JOIN cotacoes c ON c.id = ci.cotacao_id
+                       JOIN fornecedores f ON f.id = ci.fornecedor_id
+                       WHERE ci.material_id=?
+                       ORDER BY c.data_cotacao DESC, ci.preco_unitario ASC""",
+                    (int(m.id),)
+                )
+                if not hist_cot.empty:
+                    hist_cot["Preço_Unit"] = hist_cot["Preço_Unit"].apply(fmt_brl)
+                    st.dataframe(hist_cot, use_container_width=True, hide_index=True)
                 else:
-                    try:
-                        write(
-                            """INSERT INTO materiais(
-                               codigo,descricao,categoria,subcategoria,fabricante,modelo,
-                               codigo_fabricante,dn,pn,material_fabricacao,tipo_conexao,
-                               acionamento,aplicacao,palavras_chave,descricao_tecnica,status)
-                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (
-                                codigo.strip() or None, descricao.strip(), categoria, sub.strip(),
-                                fab.strip(), modelo.strip(), codfab.strip(), dn.strip(), pn.strip(),
-                                mat, conex, ac, aplic, palavras.strip(), desc.strip(), status
+                    st.caption("Sem cotações registradas para este material.")
+
+            with t_doc:
+                anexos_mat = read(
+                    "SELECT id, tipo_documento, nome_original, arquivo_salvo, data_upload, observacoes "
+                    "FROM anexos WHERE entidade_tipo='material' AND entidade_id=? ORDER BY id DESC",
+                    (int(m.id),)
+                )
+                if anexos_mat.empty:
+                    st.caption("Nenhum arquivo anexado a este material.")
+                else:
+                    for _, ax in anexos_mat.iterrows():
+                        caminho = ANEXOS_DIR / ax["arquivo_salvo"]
+                        col_a, col_b = st.columns([4, 1])
+                        info_ax = f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax['data_upload'] or ''})"
+                        if ax["observacoes"]:
+                            info_ax += f" — _{ax['observacoes']}_"
+                        col_a.write(info_ax)
+                        if caminho.exists():
+                            col_b.download_button(
+                                "Baixar",
+                                data=caminho.read_bytes(),
+                                file_name=ax["nome_original"],
+                                key=f"dl_pesq_mat_{ax['id']}"
                             )
-                        )
-                        st.success("Material cadastrado.")
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("Código interno já cadastrado. Use outro código ou deixe em branco.")
+                        else:
+                            col_b.caption("Arquivo ausente")
 
-    with aba_editar:
-        mats = read("SELECT * FROM materiais ORDER BY id DESC")
-        if mats.empty:
-            st.info("Nenhum material cadastrado para editar ou excluir.")
-        else:
-            cols_resumo = ["id", "codigo", "descricao", "categoria", "fabricante", "modelo", "dn", "pn", "status"]
-            st.dataframe(mats[cols_resumo], use_container_width=True, hide_index=True)
 
-            def label_mat_edit(i):
-                r = mats.loc[mats["id"] == i].iloc[0]
-                return f"ID {i} — {r['descricao']} (DN {r['dn'] or '—'} | Fab: {r['fabricante'] or '—'})"
+# ==============================================================================
+# 2. MATERIAIS & FORNECEDORES
+# ==============================================================================
+elif menu == "📦 Materiais & Fornecedores":
+    st.title("Materiais & Fornecedores")
+    st.caption("Cadastre, edite e vincule os itens do seu catálogo técnico e sua base de fornecedores.")
 
-            mid_edit = st.selectbox("Selecione o material pelo ID", mats["id"].tolist(), format_func=label_mat_edit)
-            item = mats[mats["id"] == mid_edit].iloc[0]
+    sec_mat, sec_forn, sec_vinc = st.tabs([
+        "🧱 Materiais",
+        "🏢 Fornecedores",
+        "🔗 Vincular Material x Fornecedor"
+    ])
 
-            with st.form("form_editar_material"):
+    # --- SUB-SEÇÃO: MATERIAIS ---
+    with sec_mat:
+        sub_m_novo, sub_m_edit = st.tabs(["Cadastrar novo material", "Editar ou excluir material"])
+
+        with sub_m_novo:
+            with st.form("material"):
                 a, b = st.columns(2)
-                e_descricao = a.text_input("Descrição *", value=item["descricao"] or "")
-                e_codigo = b.text_input("Código interno", value=item["codigo"] or "")
-                e_categoria = a.selectbox("Categoria", CATEGORIAS, index=idx_opcao(CATEGORIAS, item["categoria"]))
-                e_sub = b.text_input("Subcategoria", value=item["subcategoria"] or "")
-                e_fab = a.text_input("Fabricante", value=item["fabricante"] or "")
-                e_modelo = b.text_input("Modelo", value=item["modelo"] or "")
-                e_codfab = a.text_input("Código do fabricante", value=item["codigo_fabricante"] or "")
-                e_dn = b.text_input("DN", value=item["dn"] or "")
-                e_pn = a.text_input("PN", value=item["pn"] or "")
-                e_mat = b.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
-                e_conex = a.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
-                e_ac = b.selectbox("Acionamento", ACIONAMENTOS, index=idx_opcao(ACIONAMENTOS, item["acionamento"]))
-                e_aplic = a.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
-                e_palavras = st.text_input("Palavras-chave (separadas por vírgula)", value=item["palavras_chave"] or "")
-                e_desc = st.text_area("Descrição técnica / observações", value=item["descricao_tecnica"] or "")
-                e_status = st.selectbox("Status", STATUS_MAT, index=idx_opcao(STATUS_MAT, item["status"]))
-                salvar_edicao = st.form_submit_button("Salvar alterações")
+                descricao = a.text_input("Descrição *")
+                codigo = b.text_input("Código interno")
+                categoria = a.selectbox("Categoria", CATEGORIAS)
+                sub = b.text_input("Subcategoria")
+                fab = a.text_input("Fabricante")
+                modelo = b.text_input("Modelo")
+                codfab = a.text_input("Código do fabricante")
+                dn = b.text_input("DN")
+                pn = a.text_input("PN")
+                mat = b.selectbox("Material de fabricação", MATERIAIS_FAB)
+                conex = a.selectbox("Tipo de conexão", CONEXOES)
+                ac = b.selectbox("Acionamento", ACIONAMENTOS)
+                aplic = a.selectbox("Aplicação", APLICACOES)
+                palavras = st.text_input("Palavras-chave (separadas por vírgula)")
+                desc = st.text_area("Descrição técnica / observações")
+                status = st.selectbox("Status", STATUS_MAT)
+                forcar_similar = st.checkbox("Confirmar cadastro mesmo existindo material com descrição igual")
+                ok = st.form_submit_button("Salvar material", type="primary")
 
-            if salvar_edicao:
-                if not e_descricao.strip():
+            if ok:
+                if not descricao.strip():
                     st.error("Descrição é obrigatória.")
                 else:
-                    outros = mats[mats["id"] != mid_edit]
-                    if not outros.empty:
-                        dup_exato = outros[
-                            outros.apply(
-                                lambda r: norm(r["descricao"]) == norm(e_descricao)
-                                and norm(r["fabricante"]) == norm(e_fab)
-                                and norm(r["modelo"]) == norm(e_modelo)
-                                and norm(r["dn"]) == norm(e_dn),
+                    existentes = read("SELECT id, codigo, descricao, fabricante, modelo, dn, pn, status FROM materiais")
+                    desc_n, fab_n, mod_n, dn_n = norm(descricao), norm(fab), norm(modelo), norm(dn)
+
+                    if not existentes.empty:
+                        duplicados_exatos = existentes[
+                            existentes.apply(
+                                lambda r: norm(r["descricao"]) == desc_n
+                                and norm(r["fabricante"]) == fab_n
+                                and norm(r["modelo"]) == mod_n
+                                and norm(r["dn"]) == dn_n,
                                 axis=1,
                             )
                         ]
+                        mesma_descricao = existentes[
+                            existentes.apply(lambda r: norm(r["descricao"]) == desc_n, axis=1)
+                        ]
                     else:
-                        dup_exato = pd.DataFrame()
+                        duplicados_exatos = pd.DataFrame()
+                        mesma_descricao = pd.DataFrame()
 
-                    if not dup_exato.empty:
-                        st.error("Já existe outro material cadastrado com exatamente estes mesmos dados.")
+                    if not duplicados_exatos.empty:
+                        st.error("Este material já está cadastrado com os mesmos dados:")
+                        st.dataframe(duplicados_exatos, use_container_width=True, hide_index=True)
+                    elif not mesma_descricao.empty and not forcar_similar:
+                        st.warning("Já existe material com essa descrição. Marque a caixa de confirmação se for variação válida:")
+                        st.dataframe(mesma_descricao, use_container_width=True, hide_index=True)
                     else:
                         try:
                             write(
-                                """UPDATE materiais SET
-                                   codigo=?, descricao=?, categoria=?, subcategoria=?, fabricante=?, modelo=?,
-                                   codigo_fabricante=?, dn=?, pn=?, material_fabricacao=?, tipo_conexao=?,
-                                   acionamento=?, aplicacao=?, palavras_chave=?, descricao_tecnica=?, status=?
-                                   WHERE id=?""",
+                                """INSERT INTO materiais(
+                                   codigo,descricao,categoria,subcategoria,fabricante,modelo,
+                                   codigo_fabricante,dn,pn,material_fabricacao,tipo_conexao,
+                                   acionamento,aplicacao,palavras_chave,descricao_tecnica,status)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                 (
-                                    e_codigo.strip() or None, e_descricao.strip(), e_categoria, e_sub.strip(),
-                                    e_fab.strip(), e_modelo.strip(), e_codfab.strip(), e_dn.strip(), e_pn.strip(),
-                                    e_mat, e_conex, e_ac, e_aplic, e_palavras.strip(), e_desc.strip(), e_status,
-                                    int(mid_edit)
+                                    codigo.strip() or None, descricao.strip(), categoria, sub.strip(),
+                                    fab.strip(), modelo.strip(), codfab.strip(), dn.strip(), pn.strip(),
+                                    mat, conex, ac, aplic, palavras.strip(), desc.strip(), status
                                 )
                             )
-                            st.success("Material atualizado com sucesso.")
+                            st.success("Material cadastrado.")
                             st.rerun()
                         except sqlite3.IntegrityError:
-                            st.error("Código interno já pertence a outro material.")
+                            st.error("Código interno já cadastrado. Use outro código ou deixe em branco.")
 
-            st.divider()
-            st.subheader("Excluir material")
-            qtd_rel = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
-            qtd_cot = read("SELECT COUNT(*) AS total FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
-            if qtd_rel > 0 or qtd_cot > 0:
-                st.warning(f"Este material possui {qtd_rel} vínculo(s) com fornecedores e {qtd_cot} item(ns) em cotações.")
-            confirmar_del_mat = st.checkbox(
-                "Confirmo que desejo excluir permanentemente este material",
-                key=f"del_mat_{mid_edit}"
-            )
-            if st.button("Excluir material selecionado", type="primary"):
-                if not confirmar_del_mat:
-                    st.error("Marque a caixa de confirmação antes de excluir.")
-                else:
-                    remover_anexos_entidade("material", int(mid_edit))
-                    write("DELETE FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))
-                    write("DELETE FROM fornecimentos WHERE material_id=?", (int(mid_edit),))
-                    write("DELETE FROM materiais WHERE id=?", (int(mid_edit),))
-                    st.success("Material excluído.")
-                    st.rerun()
-
-elif page == "Fornecedores":
-    st.header("Fornecedores")
-    aba_f_novo, aba_f_editar = st.tabs(["Cadastrar novo", "Editar ou excluir"])
-
-    with aba_f_novo:
-        with st.form("fornecedor"):
-            razao = st.text_input("Razão social *")
-            fantasia = st.text_input("Nome fantasia")
-            cnpj = st.text_input("CNPJ")
-            contato = st.text_input("Contato comercial")
-            email = st.text_input("E-mail")
-            telefone = st.text_input("Telefone")
-            site = st.text_input("Site")
-            obs = st.text_area("Observações")
-            ok = st.form_submit_button("Salvar fornecedor")
-
-        if ok:
-            if not razao.strip():
-                st.error("Razão social é obrigatória.")
+        with sub_m_edit:
+            mats = read("SELECT * FROM materiais ORDER BY id DESC")
+            if mats.empty:
+                st.info("Nenhum material cadastrado para editar ou excluir.")
             else:
-                f_existentes = read("SELECT id, razao_social, nome_fantasia, cnpj, contato FROM fornecedores")
-                razao_n = norm(razao)
-                cnpj_d = apenas_digitos(cnpj)
+                cols_resumo = ["id", "codigo", "descricao", "categoria", "fabricante", "modelo", "dn", "pn", "status"]
+                st.dataframe(mats[cols_resumo], use_container_width=True, hide_index=True)
 
-                if not f_existentes.empty:
-                    dup_forn = f_existentes[
-                        f_existentes.apply(
-                            lambda r: norm(r["razao_social"]) == razao_n
-                            or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d),
-                            axis=1,
-                        )
-                    ]
-                else:
-                    dup_forn = pd.DataFrame()
+                def label_mat_edit(i):
+                    r = mats.loc[mats["id"] == i].iloc[0]
+                    return f"ID {i} — {r['descricao']} (DN {r['dn'] or '—'} | Fab: {r['fabricante'] or '—'})"
 
-                if not dup_forn.empty:
-                    st.error("Já existe um fornecedor cadastrado com esta Razão Social ou CNPJ:")
-                    st.dataframe(dup_forn, use_container_width=True, hide_index=True)
-                else:
-                    write(
-                        """INSERT INTO fornecedores(
-                           razao_social,nome_fantasia,cnpj,contato,email,telefone,site,observacoes)
-                           VALUES(?,?,?,?,?,?,?,?)""",
-                        (
-                            razao.strip(), fantasia.strip(), cnpj.strip(), contato.strip(),
-                            email.strip(), telefone.strip(), site.strip(), obs.strip()
-                        )
-                    )
-                    st.success("Fornecedor cadastrado.")
-                    st.rerun()
+                mid_edit = st.selectbox("Selecione o material pelo ID", mats["id"].tolist(), format_func=label_mat_edit)
+                item = mats[mats["id"] == mid_edit].iloc[0]
 
-        st.subheader("Fornecedores registrados")
-        df_forn_lista = read(
-            "SELECT id,razao_social,nome_fantasia,cnpj,contato,email,telefone "
-            "FROM fornecedores ORDER BY razao_social"
-        )
-        st.dataframe(df_forn_lista, use_container_width=True, hide_index=True)
+                with st.form("form_editar_material"):
+                    a, b = st.columns(2)
+                    e_descricao = a.text_input("Descrição *", value=item["descricao"] or "")
+                    e_codigo = b.text_input("Código interno", value=item["codigo"] or "")
+                    e_categoria = a.selectbox("Categoria", CATEGORIAS, index=idx_opcao(CATEGORIAS, item["categoria"]))
+                    e_sub = b.text_input("Subcategoria", value=item["subcategoria"] or "")
+                    e_fab = a.text_input("Fabricante", value=item["fabricante"] or "")
+                    e_modelo = b.text_input("Modelo", value=item["modelo"] or "")
+                    e_codfab = a.text_input("Código do fabricante", value=item["codigo_fabricante"] or "")
+                    e_dn = b.text_input("DN", value=item["dn"] or "")
+                    e_pn = a.text_input("PN", value=item["pn"] or "")
+                    e_mat = b.selectbox("Material de fabricação", MATERIAIS_FAB, index=idx_opcao(MATERIAIS_FAB, item["material_fabricacao"]))
+                    e_conex = a.selectbox("Tipo de conexão", CONEXOES, index=idx_opcao(CONEXOES, item["tipo_conexao"]))
+                    e_ac = b.selectbox("Acionamento", ACIONAMENTOS, index=idx_opcao(ACIONAMENTOS, item["acionamento"]))
+                    e_aplic = a.selectbox("Aplicação", APLICACOES, index=idx_opcao(APLICACOES, item["aplicacao"]))
+                    e_palavras = st.text_input("Palavras-chave (separadas por vírgula)", value=item["palavras_chave"] or "")
+                    e_desc = st.text_area("Descrição técnica / observações", value=item["descricao_tecnica"] or "")
+                    e_status = st.selectbox("Status", STATUS_MAT, index=idx_opcao(STATUS_MAT, item["status"]))
+                    salvar_edicao = st.form_submit_button("Salvar alterações")
 
-    with aba_f_editar:
-        forns = read("SELECT * FROM fornecedores ORDER BY id DESC")
-        if forns.empty:
-            st.info("Nenhum fornecedor cadastrado para editar ou excluir.")
-        else:
-            cols_f = ["id", "razao_social", "nome_fantasia", "cnpj", "contato", "email", "telefone"]
-            st.dataframe(forns[cols_f], use_container_width=True, hide_index=True)
+                if salvar_edicao:
+                    if not e_descricao.strip():
+                        st.error("Descrição é obrigatória.")
+                    else:
+                        outros = mats[mats["id"] != mid_edit]
+                        if not outros.empty:
+                            dup_exato = outros[
+                                outros.apply(
+                                    lambda r: norm(r["descricao"]) == norm(e_descricao)
+                                    and norm(r["fabricante"]) == norm(e_fab)
+                                    and norm(r["modelo"]) == norm(e_modelo)
+                                    and norm(r["dn"]) == norm(e_dn),
+                                    axis=1,
+                                )
+                            ]
+                        else:
+                            dup_exato = pd.DataFrame()
 
-            def label_forn_edit(i):
-                r = forns.loc[forns["id"] == i].iloc[0]
-                return f"ID {i} — {r['razao_social']} ({r['cnpj'] or 'Sem CNPJ'})"
+                        if not dup_exato.empty:
+                            st.error("Já existe outro material cadastrado com exatamente estes mesmos dados.")
+                        else:
+                            try:
+                                write(
+                                    """UPDATE materiais SET
+                                       codigo=?, descricao=?, categoria=?, subcategoria=?, fabricante=?, modelo=?,
+                                       codigo_fabricante=?, dn=?, pn=?, material_fabricacao=?, tipo_conexao=?,
+                                       acionamento=?, aplicacao=?, palavras_chave=?, descricao_tecnica=?, status=?
+                                       WHERE id=?""",
+                                    (
+                                        e_codigo.strip() or None, e_descricao.strip(), e_categoria, e_sub.strip(),
+                                        e_fab.strip(), e_modelo.strip(), e_codfab.strip(), e_dn.strip(), e_pn.strip(),
+                                        e_mat, e_conex, e_ac, e_aplic, e_palavras.strip(), e_desc.strip(), e_status,
+                                        int(mid_edit)
+                                    )
+                                )
+                                st.success("Material atualizado com sucesso.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Código interno já pertence a outro material.")
 
-            fid_edit = st.selectbox("Selecione o fornecedor pelo ID", forns["id"].tolist(), format_func=label_forn_edit)
-            f_item = forns[forns["id"] == fid_edit].iloc[0]
+                st.divider()
+                st.subheader("Excluir material")
+                qtd_rel = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
+                qtd_cot = read("SELECT COUNT(*) AS total FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))["total"].iloc[0]
+                if qtd_rel > 0 or qtd_cot > 0:
+                    st.warning(f"Este material possui {qtd_rel} vínculo(s) com fornecedores e {qtd_cot} item(ns) em cotações.")
+                confirmar_del_mat = st.checkbox(
+                    "Confirmo que desejo excluir permanentemente este material",
+                    key=f"del_mat_{mid_edit}"
+                )
+                if st.button("Excluir material selecionado", type="primary"):
+                    if not confirmar_del_mat:
+                        st.error("Marque a caixa de confirmação antes de excluir.")
+                    else:
+                        remover_anexos_entidade("material", int(mid_edit))
+                        write("DELETE FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))
+                        write("DELETE FROM fornecimentos WHERE material_id=?", (int(mid_edit),))
+                        write("DELETE FROM materiais WHERE id=?", (int(mid_edit),))
+                        st.success("Material excluído.")
+                        st.rerun()
 
-            with st.form("form_editar_fornecedor"):
-                e_razao = st.text_input("Razão social *", value=f_item["razao_social"] or "")
-                e_fantasia = st.text_input("Nome fantasia", value=f_item["nome_fantasia"] or "")
-                e_cnpj = st.text_input("CNPJ", value=f_item["cnpj"] or "")
-                e_contato = st.text_input("Contato comercial", value=f_item["contato"] or "")
-                e_email = st.text_input("E-mail", value=f_item["email"] or "")
-                e_telefone = st.text_input("Telefone", value=f_item["telefone"] or "")
-                e_site = st.text_input("Site", value=f_item["site"] or "")
-                e_obs = st.text_area("Observações", value=f_item["observacoes"] or "")
-                salvar_f = st.form_submit_button("Salvar alterações")
+    # --- SUB-SEÇÃO: FORNECEDORES ---
+    with sec_forn:
+        sub_f_novo, sub_f_edit = st.tabs(["Cadastrar novo fornecedor", "Editar ou excluir fornecedor"])
 
-            if salvar_f:
-                if not e_razao.strip():
+        with sub_f_novo:
+            with st.form("fornecedor"):
+                a, b = st.columns(2)
+                razao = a.text_input("Razão social *")
+                fantasia = b.text_input("Nome fantasia")
+                cnpj = a.text_input("CNPJ")
+                contato = b.text_input("Contato comercial")
+                email = a.text_input("E-mail")
+                telefone = b.text_input("Telefone")
+                site = st.text_input("Site")
+                obs = st.text_area("Observações")
+                ok = st.form_submit_button("Salvar fornecedor", type="primary")
+
+            if ok:
+                if not razao.strip():
                     st.error("Razão social é obrigatória.")
                 else:
-                    outros_f = forns[forns["id"] != fid_edit]
-                    razao_n = norm(e_razao)
-                    cnpj_d = apenas_digitos(e_cnpj)
-                    if not outros_f.empty:
-                        dup_f = outros_f[
-                            outros_f.apply(
+                    f_existentes = read("SELECT id, razao_social, nome_fantasia, cnpj, contato FROM fornecedores")
+                    razao_n = norm(razao)
+                    cnpj_d = apenas_digitos(cnpj)
+
+                    if not f_existentes.empty:
+                        dup_forn = f_existentes[
+                            f_existentes.apply(
                                 lambda r: norm(r["razao_social"]) == razao_n
                                 or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d),
                                 axis=1,
                             )
                         ]
                     else:
-                        dup_f = pd.DataFrame()
+                        dup_forn = pd.DataFrame()
 
-                    if not dup_f.empty:
-                        st.error("Já existe outro fornecedor com esta Razão Social ou CNPJ.")
+                    if not dup_forn.empty:
+                        st.error("Já existe um fornecedor cadastrado com esta Razão Social ou CNPJ:")
+                        st.dataframe(dup_forn, use_container_width=True, hide_index=True)
                     else:
                         write(
-                            """UPDATE fornecedores SET
-                               razao_social=?, nome_fantasia=?, cnpj=?, contato=?,
-                               email=?, telefone=?, site=?, observacoes=?
-                               WHERE id=?""",
+                            """INSERT INTO fornecedores(
+                               razao_social,nome_fantasia,cnpj,contato,email,telefone,site,observacoes)
+                               VALUES(?,?,?,?,?,?,?,?)""",
                             (
-                                e_razao.strip(), e_fantasia.strip(), e_cnpj.strip(), e_contato.strip(),
-                                e_email.strip(), e_telefone.strip(), e_site.strip(), e_obs.strip(), int(fid_edit)
+                                razao.strip(), fantasia.strip(), cnpj.strip(), contato.strip(),
+                                email.strip(), telefone.strip(), site.strip(), obs.strip()
                             )
                         )
-                        st.success("Fornecedor atualizado com sucesso.")
+                        st.success("Fornecedor cadastrado.")
                         st.rerun()
 
-            st.divider()
-            st.subheader("Excluir fornecedor")
-            qtd_rel_f = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))["total"].iloc[0]
-            qtd_cot_f = read("SELECT COUNT(*) AS total FROM cotacao_itens WHERE fornecedor_id=?", (int(fid_edit),))["total"].iloc[0]
-            if qtd_rel_f > 0 or qtd_cot_f > 0:
-                st.warning(f"Este fornecedor possui {qtd_rel_f} vínculo(s) com materiais e {qtd_cot_f} item(ns) em cotações.")
-            confirmar_del_forn = st.checkbox(
-                "Confirmo que desejo excluir permanentemente este fornecedor",
-                key=f"del_forn_{fid_edit}"
+            st.subheader("Fornecedores registrados")
+            df_forn_lista = read(
+                "SELECT id,razao_social,nome_fantasia,cnpj,contato,email,telefone "
+                "FROM fornecedores ORDER BY razao_social"
             )
-            if st.button("Excluir fornecedor selecionado", type="primary"):
-                if not confirmar_del_forn:
-                    st.error("Marque a caixa de confirmação antes de excluir.")
-                else:
-                    remover_anexos_entidade("fornecedor", int(fid_edit))
-                    write("DELETE FROM cotacao_itens WHERE fornecedor_id=?", (int(fid_edit),))
-                    write("DELETE FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))
-                    write("DELETE FROM fornecedores WHERE id=?", (int(fid_edit),))
-                    st.success("Fornecedor excluído.")
-                    st.rerun()
+            st.dataframe(df_forn_lista, use_container_width=True, hide_index=True)
 
-elif page == "Relacionar fornecedor":
-    st.header("Relacionar fornecedor e material")
-    ms = read("SELECT id,descricao,dn FROM materiais ORDER BY descricao")
-    fs = read("SELECT id,razao_social FROM fornecedores ORDER BY razao_social")
-    if ms.empty or fs.empty:
-        st.info("Cadastre ao menos um material e um fornecedor primeiro.")
-    else:
-        def label_mat_rel(i):
-            r = ms.loc[ms["id"] == i].iloc[0]
-            return f"{r['descricao']} (DN {r['dn'] or '—'})"
+        with sub_f_edit:
+            forns = read("SELECT * FROM fornecedores ORDER BY id DESC")
+            if forns.empty:
+                st.info("Nenhum fornecedor cadastrado para editar ou excluir.")
+            else:
+                cols_f = ["id", "razao_social", "nome_fantasia", "cnpj", "contato", "email", "telefone"]
+                st.dataframe(forns[cols_f], use_container_width=True, hide_index=True)
 
-        with st.form("rel"):
-            mid = st.selectbox("Material", ms["id"].tolist(), format_func=label_mat_rel)
-            fid = st.selectbox(
-                "Fornecedor",
-                fs["id"].tolist(),
-                format_func=lambda i: fs.loc[fs["id"] == i, "razao_social"].iloc[0]
+                def label_forn_edit(i):
+                    r = forns.loc[forns["id"] == i].iloc[0]
+                    return f"ID {i} — {r['razao_social']} ({r['cnpj'] or 'Sem CNPJ'})"
+
+                fid_edit = st.selectbox("Selecione o fornecedor pelo ID", forns["id"].tolist(), format_func=label_forn_edit)
+                f_item = forns[forns["id"] == fid_edit].iloc[0]
+
+                with st.form("form_editar_fornecedor"):
+                    a, b = st.columns(2)
+                    e_razao = a.text_input("Razão social *", value=f_item["razao_social"] or "")
+                    e_fantasia = b.text_input("Nome fantasia", value=f_item["nome_fantasia"] or "")
+                    e_cnpj = a.text_input("CNPJ", value=f_item["cnpj"] or "")
+                    e_contato = b.text_input("Contato comercial", value=f_item["contato"] or "")
+                    e_email = a.text_input("E-mail", value=f_item["email"] or "")
+                    e_telefone = b.text_input("Telefone", value=f_item["telefone"] or "")
+                    e_site = st.text_input("Site", value=f_item["site"] or "")
+                    e_obs = st.text_area("Observações", value=f_item["observacoes"] or "")
+                    salvar_f = st.form_submit_button("Salvar alterações")
+
+                if salvar_f:
+                    if not e_razao.strip():
+                        st.error("Razão social é obrigatória.")
+                    else:
+                        outros_f = forns[forns["id"] != fid_edit]
+                        razao_n = norm(e_razao)
+                        cnpj_d = apenas_digitos(e_cnpj)
+                        if not outros_f.empty:
+                            dup_f = outros_f[
+                                outros_f.apply(
+                                    lambda r: norm(r["razao_social"]) == razao_n
+                                    or (cnpj_d != "" and apenas_digitos(r["cnpj"]) == cnpj_d),
+                                    axis=1,
+                                )
+                            ]
+                        else:
+                            dup_f = pd.DataFrame()
+
+                        if not dup_f.empty:
+                            st.error("Já existe outro fornecedor com esta Razão Social ou CNPJ.")
+                        else:
+                            write(
+                                """UPDATE fornecedores SET
+                                   razao_social=?, nome_fantasia=?, cnpj=?, contato=?,
+                                   email=?, telefone=?, site=?, observacoes=?
+                                   WHERE id=?""",
+                                (
+                                    e_razao.strip(), e_fantasia.strip(), e_cnpj.strip(), e_contato.strip(),
+                                    e_email.strip(), e_telefone.strip(), e_site.strip(), e_obs.strip(), int(fid_edit)
+                                )
+                            )
+                            st.success("Fornecedor atualizado com sucesso.")
+                            st.rerun()
+
+                st.divider()
+                st.subheader("Excluir fornecedor")
+                qtd_rel_f = read("SELECT COUNT(*) AS total FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))["total"].iloc[0]
+                qtd_cot_f = read("SELECT COUNT(*) AS total FROM cotacao_itens WHERE fornecedor_id=?", (int(fid_edit),))["total"].iloc[0]
+                if qtd_rel_f > 0 or qtd_cot_f > 0:
+                    st.warning(f"Este fornecedor possui {qtd_rel_f} vínculo(s) com materiais e {qtd_cot_f} item(ns) em cotações.")
+                confirmar_del_forn = st.checkbox(
+                    "Confirmo que desejo excluir permanentemente este fornecedor",
+                    key=f"del_forn_{fid_edit}"
+                )
+                if st.button("Excluir fornecedor selecionado", type="primary"):
+                    if not confirmar_del_forn:
+                        st.error("Marque a caixa de confirmação antes de excluir.")
+                    else:
+                        remover_anexos_entidade("fornecedor", int(fid_edit))
+                        write("DELETE FROM cotacao_itens WHERE fornecedor_id=?", (int(fid_edit),))
+                        write("DELETE FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))
+                        write("DELETE FROM fornecedores WHERE id=?", (int(fid_edit),))
+                        st.success("Fornecedor excluído.")
+                        st.rerun()
+
+    # --- SUB-SEÇÃO: VÍNCULOS ---
+    with sec_vinc:
+        ms = read("SELECT id,descricao,dn FROM materiais ORDER BY descricao")
+        fs = read("SELECT id,razao_social FROM fornecedores ORDER BY razao_social")
+        if ms.empty or fs.empty:
+            st.info("Cadastre ao menos um material e um fornecedor nas abas ao lado primeiro.")
+        else:
+            def label_mat_rel(i):
+                r = ms.loc[ms["id"] == i].iloc[0]
+                return f"{r['descricao']} (DN {r['dn'] or '—'})"
+
+            with st.form("rel"):
+                c1, c2 = st.columns(2)
+                mid = c1.selectbox("Material *", ms["id"].tolist(), format_func=label_mat_rel)
+                fid = c2.selectbox(
+                    "Fornecedor *",
+                    fs["id"].tolist(),
+                    format_func=lambda i: fs.loc[fs["id"] == i, "razao_social"].iloc[0]
+                )
+                c3, c4, c5 = st.columns(3)
+                tipo = c3.selectbox("Tipo de relação", ["Forneceu", "Cotou", "Forneceu similar"])
+                fabricante = c4.text_input("Fabricante ofertado")
+                modelo = c5.text_input("Modelo ofertado")
+                data = st.date_input("Data da interação")
+                obs = st.text_area("Observações")
+                ok = st.form_submit_button("Salvar vínculo", type="primary")
+            if ok:
+                write(
+                    """INSERT INTO fornecimentos(
+                       material_id,fornecedor_id,tipo_relacao,fabricante_ofertado,
+                       modelo_ofertado,data_interacao,observacoes)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (mid, fid, tipo, fabricante, modelo, str(data), obs)
+                )
+                st.success("Relação cadastrada.")
+                st.rerun()
+
+            st.subheader("Vínculos registrados")
+            df_vinc = read(
+                """SELECT r.id, m.descricao AS Material, m.dn AS DN, f.razao_social AS Fornecedor,
+                          r.tipo_relacao AS Tipo, r.fabricante_ofertado AS Fabricante,
+                          r.modelo_ofertado AS Modelo, r.data_interacao AS Data
+                   FROM fornecimentos r
+                   JOIN materiais m ON m.id = r.material_id
+                   JOIN fornecedores f ON f.id = r.fornecedor_id
+                   ORDER BY r.id DESC"""
             )
-            tipo = st.selectbox("Tipo de relação", ["Forneceu", "Cotou", "Forneceu similar"])
-            fabricante = st.text_input("Fabricante ofertado")
-            modelo = st.text_input("Modelo ofertado")
-            data = st.date_input("Data da interação")
-            obs = st.text_area("Observações")
-            ok = st.form_submit_button("Salvar relação")
-        if ok:
-            write(
-                """INSERT INTO fornecimentos(
-                   material_id,fornecedor_id,tipo_relacao,fabricante_ofertado,
-                   modelo_ofertado,data_interacao,observacoes)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (mid, fid, tipo, fabricante, modelo, str(data), obs)
-            )
-            st.success("Relação cadastrada.")
+            st.dataframe(df_vinc, use_container_width=True, hide_index=True)
 
-elif page == "Cotações":
-    st.header("Cotações")
+
+# ==============================================================================
+# 3. COTAÇÕES & PREÇOS
+# ==============================================================================
+elif menu == "💰 Cotações & Preços":
+    st.title("Cotações & Histórico de Preços")
+    st.caption("Gerencie processos de cotação, lance propostas por fornecedor e acompanhe valores.")
+
     aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
-        "Cadastrar cotação",
-        "Itens e preços da cotação",
-        "Editar ou excluir"
+        "📋 Cadastrar cotação",
+        "💲 Itens e preços",
+        "✏️ Editar ou excluir"
     ])
 
     with aba_cot_lista:
@@ -598,7 +738,7 @@ elif page == "Cotações":
             objeto = a.text_input("Objeto")
             status = b.selectbox("Status", ["Em andamento", "Concluída", "Cancelada"])
             obs = st.text_area("Observações")
-            ok = st.form_submit_button("Criar cotação")
+            ok = st.form_submit_button("Criar cotação", type="primary")
         if ok:
             write(
                 "INSERT INTO cotacoes(processo,data_cotacao,objeto,status,observacoes) VALUES(?,?,?,?,?)",
@@ -649,7 +789,7 @@ elif page == "Cotações":
                 preco = c3.number_input("Preço unitário (R$) *", min_value=0.0, value=0.0, step=10.0, format="%.2f")
                 prazo = c4.text_input("Prazo de entrega", placeholder="Ex.: 15 dias úteis")
                 obs_item = st.text_input("Observações do item (frete, impostos, marca ofertada)")
-                add_item = st.form_submit_button("Adicionar preço à cotação")
+                add_item = st.form_submit_button("Adicionar preço à cotação", type="primary")
 
             if add_item:
                 if preco <= 0:
@@ -770,11 +910,20 @@ elif page == "Cotações":
                     write("DELETE FROM cotacoes WHERE id=?", (int(cid_edit),))
                     st.success("Cotação excluída.")
                     st.rerun()
-elif page == "Anexos":
-    st.header("Anexos: Propostas, Catálogos e Fichas Técnicas")
-    st.caption(f"Arquivos armazenados localmente em: {ANEXOS_DIR}")
 
-    aba_up, aba_lista = st.tabs(["Enviar novo arquivo", "Consultar e baixar anexos"])
+
+# ==============================================================================
+# 4. ANEXOS & BACKUP
+# ==============================================================================
+else:
+    st.title("Anexos & Exportação de Dados")
+    st.caption("Gerencie catálogos, fichas técnicas, propostas comerciais e cópias de segurança.")
+
+    aba_up, aba_lista, aba_exp = st.tabs([
+        "📤 Enviar novo arquivo",
+        "📂 Consultar anexos",
+        "💾 Exportar CSV & Backup"
+    ])
 
     with aba_up:
         tipo_entidade = st.selectbox(
@@ -817,7 +966,7 @@ elif page == "Anexos":
                     type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc", "csv", "txt"]
                 )
                 obs_ax = st.text_input("Observações sobre o arquivo")
-                enviar_ax = st.form_submit_button("Salvar anexo")
+                enviar_ax = st.form_submit_button("Salvar anexo", type="primary")
 
             if enviar_ax:
                 if arquivo is None:
@@ -884,14 +1033,30 @@ elif page == "Anexos":
                         write("DELETE FROM anexos WHERE id=?", (int(ax["id"]),))
                         st.rerun()
 
-else:
-    st.header("Exportar dados")
-    st.write("Exporte cópias CSV das tabelas. Para backup integral, copie o arquivo central.db e a pasta anexos/ com o aplicativo fechado.")
-    for table in ["materiais", "fornecedores", "fornecimentos", "cotacoes", "cotacao_itens", "anexos"]:
-        data = read(f"SELECT * FROM {table}")
-        st.download_button(
-            f"Baixar {table}.csv",
-            data.to_csv(index=False).encode("utf-8-sig"),
-            f"{table}.csv",
-            "text/csv"
+    with aba_exp:
+        st.subheader("Exportar tabelas em CSV")
+        st.write("Baixe planilhas individuais de cada módulo para abrir no Excel:")
+        col_e1, col_e2, col_e3 = st.columns(3)
+        tabelas = [
+            ("materiais", "Materiais", col_e1),
+            ("fornecedores", "Fornecedores", col_e2),
+            ("fornecimentos", "Vínculos", col_e3),
+            ("cotacoes", "Cotações", col_e1),
+            ("cotacao_itens", "Itens Cotados", col_e2),
+            ("anexos", "Lista de Anexos", col_e3),
+        ]
+        for tab_nome, rotulo, coluna in tabelas:
+            data = read(f"SELECT * FROM {tab_nome}")
+            coluna.download_button(
+                f"⬇️ Baixar {rotulo} (.csv)",
+                data.to_csv(index=False).encode("utf-8-sig"),
+                f"{tab_nome}.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
+        st.divider()
+        st.info(
+            "**Backup completo do sistema:** para salvar tudo em um pendrive ou pasta de segurança, "
+            "basta copiar o arquivo `central.db` e a pasta `anexos/` localizados na pasta do projeto."
         )
