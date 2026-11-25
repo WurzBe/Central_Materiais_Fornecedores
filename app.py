@@ -176,7 +176,7 @@ def carregar_fonte_tabular(arquivo_upload):
     except ImportError as imp_err:
         raise ImportError(
             f"Biblioteca necessária para arquivos '{ext}' não está instalada ({imp_err}). "
-            f"Rode no terminal: pip install pyxlsb odfpy openpyxl xlrd"
+            f"Rode no terminal: py -m pip install pyxlsb odfpy openpyxl xlrd"
         ) from imp_err
 
     aba_escolhida = excel_file.sheet_names[0]
@@ -221,9 +221,9 @@ def extrair_specs_descricao(descricao):
 
 def detectar_tabela_cotacoes_comparativa(df_raw):
     header_row = None
-    for r in range(min(12, len(df_raw))):
+    for r in range(min(40, len(df_raw))):
         vals = [norm(v) for v in df_raw.iloc[r].tolist() if pd.notna(v)]
-        if "descrição" in vals or "descricao" in vals:
+        if any(v in ("descrição", "descricao", "descrição do material", "descricao do material", "especificação", "especificacao") for v in vals):
             header_row = r
             break
 
@@ -233,36 +233,139 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
     row_h = df_raw.iloc[header_row]
     row_sub = df_raw.iloc[header_row + 1]
 
-    forn_blocks = []
-    for c in range(len(row_sub) - 1):
-        s_cur = norm(row_sub.iloc[c]) if pd.notna(row_sub.iloc[c]) else ""
-        s_nxt = norm(row_sub.iloc[c + 1]) if pd.notna(row_sub.iloc[c + 1]) else ""
-        if s_cur == "nome" and ("cotação" in s_nxt or "cotacao" in s_nxt or "valor" in s_nxt):
-            s_dt = norm(row_sub.iloc[c + 2]) if (c + 2 < len(row_sub) and pd.notna(row_sub.iloc[c + 2])) else ""
-            forn_blocks.append((c, c + 1, c + 2 if "data" in s_dt else None))
-
-    if not forn_blocks:
-        return None
-
     col_ref, col_desc, col_unid, col_qtd, col_vunit = None, None, None, None, None
     for c, val in enumerate(row_h):
         v = norm(val)
-        if v in ("ref.", "ref", "código", "codigo"):
+        if v in ("ref.", "ref", "código", "codigo", "cod", "cod."):
             col_ref = c
-        elif v in ("descrição", "descricao"):
+        elif v in ("descrição", "descricao", "descrição do material", "descricao do material", "especificação", "especificacao"):
             col_desc = c
-        elif v in ("unidade", "unid", "und"):
+        elif v in ("unidade", "unid", "und", "un"):
             col_unid = c
-        elif "quantidade" in v or v in ("qtd", "qtde"):
+        elif "quantidade" in v or v in ("qtd", "qtde", "quant"):
             col_qtd = c
-        elif "valor unit" in v or "preço unit" in v or "preco unit" in v:
+        elif "valor unit" in v or "preço unit" in v or "preco unit" in v or v in ("v. unit", "v.unit"):
             col_vunit = c
 
     if col_desc is None:
         return None
 
+    # 1. Detecta blocos agrupados no cabecalho principal (ex.: FORNECEDOR 1, FORNECEDOR 2, COTACAO 1...)
+    forn_blocks = []
+    headers_nao_vazios = [
+        (c, str(val).strip(), norm(val))
+        for c, val in enumerate(row_h)
+        if pd.notna(val) and str(val).strip()
+    ]
+    for idx_h_pos, (c_ini, raw_h, nh) in enumerate(headers_nao_vazios):
+        if re.match(r"^(fornecedor|cotação|cotacao|proposta|empresa)\s*\d+$", nh):
+            c_fim = headers_nao_vazios[idx_h_pos + 1][0] if idx_h_pos + 1 < len(headers_nao_vazios) else len(row_sub)
+            c_nome, c_preco, c_data = None, None, None
+            for col_i in range(c_ini, c_fim):
+                sv = norm(row_sub.iloc[col_i]) if pd.notna(row_sub.iloc[col_i]) else ""
+                if c_nome is None and any(k in sv for k in ("nome", "fornecedor", "empresa", "razão", "razao")):
+                    c_nome = col_i
+                elif c_preco is None and any(k in sv for k in ("cotação", "cotacao", "valor", "preço", "preco", "unit")):
+                    c_preco = col_i
+                elif c_data is None and "data" in sv:
+                    c_data = col_i
+
+            # Se o sub-cabecalho nao tiver rotulos claros, deduz pelas colunas do bloco (texto = fornecedor, numero = preco)
+            if c_nome is None or c_preco is None:
+                amostra_bloco = df_raw.iloc[header_row + 2:min(header_row + 40, len(df_raw))]
+                for col_i in range(c_ini, c_fim):
+                    vals_col = [v for v in amostra_bloco.iloc[:, col_i].tolist() if pd.notna(v) and str(v).strip()]
+                    if not vals_col:
+                        continue
+                    qtd_num = sum(1 for v in vals_col if parse_numero(v) > 0)
+                    qtd_txt = sum(1 for v in vals_col if parse_numero(v) == 0 and not re.match(r"^\d{2,4}[-/]\d{2}[-/]\d{2,4}", str(v).strip()))
+                    if c_nome is None and qtd_txt > qtd_num:
+                        c_nome = col_i
+                    elif c_preco is None and qtd_num >= qtd_txt and qtd_num > 0:
+                        c_preco = col_i
+
+            if c_nome is not None and c_preco is not None:
+                forn_blocks.append((c_nome, c_preco, c_data))
+
+    # 2. Fallback: sub-cabecalho repetido com "Nome" + "Cotacao / Preco / Valor"
+    if not forn_blocks:
+        for c in range(len(row_sub) - 1):
+            s_cur = norm(row_sub.iloc[c]) if pd.notna(row_sub.iloc[c]) else ""
+            s_nxt = norm(row_sub.iloc[c + 1]) if pd.notna(row_sub.iloc[c + 1]) else ""
+            if s_cur in ("nome", "fornecedor", "empresa") and any(k in s_nxt for k in ("cotação", "cotacao", "valor", "preço", "preco", "unit")):
+                s_dt = norm(row_sub.iloc[c + 2]) if (c + 2 < len(row_sub) and pd.notna(row_sub.iloc[c + 2])) else ""
+                forn_blocks.append((c, c + 1, c + 2 if "data" in s_dt else None))
+
+    # 3. Fallback: nome de cada fornecedor direto no cabecalho principal (ex.: coluna "Tupy", coluna "Saint-Gobain")
+    forn_header_cols = []
+    data_start_row = header_row + 2 if forn_blocks else header_row + 1
+
+    if not forn_blocks:
+        ignorar_cols = {
+            "item", "ref", "ref.", "código", "codigo", "cod", "cod.",
+            "descrição", "descricao", "descrição do material", "descricao do material",
+            "especificação", "especificacao", "material", "unidade", "unid", "und", "un",
+            "quantidade", "qtd", "qtde", "quant", "valor unit", "valor unitário", "valor unitario",
+            "preço unit", "preco unit", "preço unitário", "preco unitario", "v. unit", "v.unit",
+            "valor total", "preço total", "preco total", "total", "subtotal", "total geral",
+            "orçamento", "orcamento", "valor orçado", "valor orcado", "estimado",
+            "referência", "referencia", "menor preço", "menor preco", "melhor preço", "melhor preco",
+            "maior valor", "menor valor", "cotação mais antiga", "cotacao mais antiga",
+            "cotação mais recente", "cotacao mais recente", "n° cot", "nº cot", "num cot",
+            "origem", "origem caj", "fonte", "média", "media", "mediana",
+            "observação", "observacao", "observações", "observacoes", "obs",
+            "marca", "fabricante", "prazo", "status", "diferença", "diferenca", "%"
+        }
+
+        desc_sub = norm(row_sub.iloc[col_desc]) if pd.notna(row_sub.iloc[col_desc]) else ""
+        sub_vals_norm = [norm(v) for v in row_sub.tolist() if pd.notna(v)]
+        tem_sub_header = (desc_sub == "" and any(
+            any(k in sv for k in ("unit", "total", "preço", "preco", "valor", "cotação", "cotacao", "prazo", "marca"))
+            for sv in sub_vals_norm
+        ))
+        if tem_sub_header:
+            data_start_row = header_row + 2
+
+        headers_propagados = {}
+        ultimo_header_forn = ""
+        for c in range(len(row_h)):
+            raw_h = str(row_h.iloc[c]).strip() if pd.notna(row_h.iloc[c]) else ""
+            nh = norm(raw_h)
+            sub_c = norm(row_sub.iloc[c]) if (tem_sub_header and pd.notna(row_sub.iloc[c])) else ""
+
+            if (
+                c in (col_ref, col_desc, col_unid, col_qtd, col_vunit)
+                or nh in ignorar_cols
+                or nh.startswith(("valor ", "preço ", "preco ", "total", "menor", "maior", "média", "media", "cotação ", "cotacao ", "n°", "nº", "origem"))
+            ):
+                ultimo_header_forn = ""
+                continue
+
+            if raw_h and not raw_h.replace(".", "").replace(",", "").isdigit() and len(raw_h) >= 2:
+                ultimo_header_forn = raw_h
+                headers_propagados[c] = raw_h
+            elif tem_sub_header and raw_h == "" and ultimo_header_forn and any(k in sub_c for k in ("unit", "preço", "preco", "valor", "cotação", "cotacao")):
+                headers_propagados[c] = ultimo_header_forn
+
+        forn_ja_add = set()
+        for c, nome_forn_col in headers_propagados.items():
+            sub_c = norm(row_sub.iloc[c]) if (tem_sub_header and pd.notna(row_sub.iloc[c])) else ""
+            if tem_sub_header and "total" in sub_c and "unit" not in sub_c:
+                continue
+            if norm(nome_forn_col) in forn_ja_add:
+                continue
+
+            amostra = df_raw.iloc[data_start_row:min(data_start_row + 30, len(df_raw)), c]
+            tem_preco = any(parse_numero(v) > 0 for v in amostra if pd.notna(v))
+            if tem_preco:
+                forn_header_cols.append((c, nome_forn_col))
+                forn_ja_add.add(norm(nome_forn_col))
+
+    if not forn_blocks and not forn_header_cols:
+        return None
+
     itens = []
-    for r in range(header_row + 2, len(df_raw)):
+    for r in range(data_start_row, len(df_raw)):
         row = df_raw.iloc[r]
         desc = row.iloc[col_desc]
         if pd.isna(desc) or not str(desc).strip():
@@ -281,15 +384,24 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
         dn_val, pn_val, mat_val, cat_val = extrair_specs_descricao(desc_s)
 
         cotacoes_forn = []
-        for c_nome, c_preco, c_data in forn_blocks:
-            fn = row.iloc[c_nome]
-            fp = row.iloc[c_preco]
-            fd = row.iloc[c_data] if c_data is not None else None
-            if pd.notna(fn) and str(fn).strip() and pd.notna(fp):
-                p_num = parse_numero(fp)
-                if p_num > 0:
-                    dt_str = str(fd)[:10] if pd.notna(fd) else ""
-                    cotacoes_forn.append({"fornecedor": str(fn).strip(), "preco": p_num, "data": dt_str})
+        if forn_blocks:
+            for c_nome, c_preco, c_data in forn_blocks:
+                fn = row.iloc[c_nome]
+                fp = row.iloc[c_preco]
+                fd = row.iloc[c_data] if c_data is not None else None
+                fn_s = str(fn).strip() if pd.notna(fn) else ""
+                if fn_s and fn_s not in ("-", "—", "0", "nan", "None") and pd.notna(fp):
+                    p_num = parse_numero(fp)
+                    if p_num > 0:
+                        dt_str = str(fd)[:10] if pd.notna(fd) else ""
+                        cotacoes_forn.append({"fornecedor": fn_s, "preco": p_num, "data": dt_str})
+        else:
+            for c_preco, nome_f in forn_header_cols:
+                fp = row.iloc[c_preco]
+                if pd.notna(fp):
+                    p_num = parse_numero(fp)
+                    if p_num > 0:
+                        cotacoes_forn.append({"fornecedor": nome_f, "preco": p_num, "data": ""})
 
         itens.append({
             "codigo": ref_s, "descricao": desc_s, "categoria": cat_val,
@@ -372,6 +484,33 @@ def remover_anexos_entidade(entidade_tipo, entidade_id):
         if arq.exists():
             arq.unlink()
     write("DELETE FROM anexos WHERE entidade_tipo=? AND entidade_id=?", (entidade_tipo, int(entidade_id)))
+
+
+def analisar_itens_exclusivos_cotacao(cotacao_id):
+    cid = int(cotacao_id)
+    df_ci = read("SELECT DISTINCT material_id, fornecedor_id FROM cotacao_itens WHERE cotacao_id=?", (cid,))
+    df_ax = read("SELECT DISTINCT fornecedor_id FROM anexos WHERE entidade_tipo='cotacao' AND entidade_id=? AND fornecedor_id IS NOT NULL", (cid,))
+
+    mats_cot = {int(x) for x in df_ci["material_id"].dropna().tolist()} if not df_ci.empty else set()
+    forns_cot = {int(x) for x in df_ci["fornecedor_id"].dropna().tolist()} if not df_ci.empty else set()
+    if not df_ax.empty:
+        forns_cot.update(int(x) for x in df_ax["fornecedor_id"].dropna().tolist())
+
+    mats_exclusivos = []
+    for mid in sorted(mats_cot):
+        outros_ci = read("SELECT COUNT(*) AS n FROM cotacao_itens WHERE material_id=? AND cotacao_id<>?", (mid, cid))["n"].iloc[0]
+        outros_vinc = read("SELECT COUNT(*) AS n FROM fornecimentos WHERE material_id=?", (mid,))["n"].iloc[0]
+        if int(outros_ci) == 0 and int(outros_vinc) == 0:
+            mats_exclusivos.append(mid)
+
+    forns_exclusivos = []
+    for fid in sorted(forns_cot):
+        outros_ci = read("SELECT COUNT(*) AS n FROM cotacao_itens WHERE fornecedor_id=? AND cotacao_id<>?", (fid, cid))["n"].iloc[0]
+        outros_vinc = read("SELECT COUNT(*) AS n FROM fornecimentos WHERE fornecedor_id=?", (fid,))["n"].iloc[0]
+        if int(outros_ci) == 0 and int(outros_vinc) == 0:
+            forns_exclusivos.append(fid)
+
+    return mats_exclusivos, forns_exclusivos
 
 
 def aplicar_estilo():
@@ -824,17 +963,24 @@ elif menu == "💰 Cotações & Preços":
                 itens_comparativos = detectar_tabela_cotacoes_comparativa(df_bruto)
 
                 if itens_comparativos is not None and len(itens_comparativos) > 0:
-                    total_cots_forn = sum(len(x["cotacoes"]) for x in itens_comparativos)
-                    forns_unicos = sorted({c["fornecedor"] for x in itens_comparativos for c in x["cotacoes"]})
+                    apenas_com_forn = st.checkbox(
+                        "Ignorar linhas sem proposta de fornecedor (ex.: despesas administrativas / ORIGEM CAJ)",
+                        value=True,
+                        key="chk_apenas_com_forn"
+                    )
+                    itens_filtrados = [x for x in itens_comparativos if x["cotacoes"]] if apenas_com_forn else itens_comparativos
+
+                    total_cots_forn = sum(len(x["cotacoes"]) for x in itens_filtrados)
+                    forns_unicos = sorted({c["fornecedor"] for x in itens_filtrados for c in x["cotacoes"]})
 
                     st.info(
                         f"Modelo **Tabela de Cotações Comparativa** detectado: "
-                        f"**{len(itens_comparativos)} materiais** e **{total_cots_forn} propostas** "
+                        f"**{len(itens_filtrados)} materiais** e **{total_cots_forn} propostas** "
                         f"({', '.join(forns_unicos)})."
                     )
 
                     previa_rows = []
-                    for it in itens_comparativos[:10]:
+                    for it in itens_filtrados[:12]:
                         forns_str = " | ".join(f"{c['fornecedor']}: {fmt_brl(c['preco'])}" for c in it["cotacoes"])
                         previa_rows.append({
                             "Código": it["codigo"], "Descrição": it["descricao"], "DN": it["dn"],
@@ -871,7 +1017,7 @@ elif menu == "💰 Cotações & Preços":
                             qtd_mat_novos = 0
                             qtd_precos_salvos = 0
 
-                            for it in itens_comparativos:
+                            for it in itens_filtrados:
                                 mid_linha, eh_novo = obter_ou_criar_material(
                                     descricao=it["descricao"], codigo=it["codigo"], dn=it["dn"],
                                     pn=it["pn"], material_fab=it["material"], categoria=it["categoria"]
@@ -911,7 +1057,14 @@ elif menu == "💰 Cotações & Preços":
                             st.rerun()
 
                 else:
-                    linha_cab = st.number_input("Número da linha do cabeçalho (1 = primeira linha)", min_value=1, max_value=min(30, max(1, len(df_bruto))), value=1)
+                    linha_sugerida = 1
+                    for r in range(min(40, len(df_bruto))):
+                        vals = [norm(v) for v in df_bruto.iloc[r].tolist() if pd.notna(v)]
+                        if any(k in vals for k in ("descrição", "descricao", "material", "item")):
+                            linha_sugerida = r + 1
+                            break
+
+                    linha_cab = st.number_input("Número da linha do cabeçalho (1 = primeira linha)", min_value=1, max_value=min(60, max(1, len(df_bruto))), value=linha_sugerida)
                     idx_h = int(linha_cab) - 1
                     df_raw = df_bruto.iloc[idx_h + 1:].copy().reset_index(drop=True)
                     df_raw.columns = [str(c).strip() if pd.notna(c) and str(c).strip() else f"Coluna_{i+1}" for i, c in enumerate(df_bruto.iloc[idx_h].tolist())]
@@ -935,7 +1088,7 @@ elif menu == "💰 Cotações & Preços":
 
                             m4, m5, m6 = st.columns(3)
                             col_unid = m4.selectbox("Coluna Unidade", cols_opc, index=achar_coluna_padrao(cols_opc, ["unid", "und"]))
-                            col_forn = m5.selectbox("Coluna Fornecedor", cols_opc, index=achar_coluna_padrao(cols_opc, ["forn", "empresa"]))
+                            col_forn = m5.selectbox("Coluna Fornecedor", cols_opc, index=achar_coluna_padrao(cols_opc, ["forn", "empresa", "razão", "razao", "parceiro", "distribuidor", "nome"]))
                             col_cod = m6.selectbox("Coluna Código / Ref.", cols_opc, index=achar_coluna_padrao(cols_opc, ["ref", "cod"]))
 
                             confirmar_s = st.form_submit_button("🚀 Arquivar arquivo e importar itens", type="primary")
@@ -1085,6 +1238,9 @@ elif menu == "💰 Cotações & Preços":
                             st.rerun()
 
     with aba_cot_editar:
+        if "msg_del_cot" in st.session_state:
+            st.success(st.session_state.pop("msg_del_cot"))
+
         cots_ed = read("SELECT * FROM cotacoes ORDER BY id DESC")
         if cots_ed.empty:
             st.info("Nenhuma cotação cadastrada.")
@@ -1117,17 +1273,56 @@ elif menu == "💰 Cotações & Preços":
                 st.rerun()
 
             st.divider()
-            st.subheader("Excluir cotação / orçamento")
-            confirmar_del_cot = st.checkbox("Confirmo que desejo excluir permanentemente este registro (e seus itens/anexos)", key=f"del_cot_{cid_edit}")
-            if st.button("Excluir registro selecionado", type="primary"):
-                if confirmar_del_cot:
-                    remover_anexos_entidade("cotacao", int(cid_edit))
-                    write("DELETE FROM cotacao_itens WHERE cotacao_id=?", (int(cid_edit),))
-                    write("DELETE FROM cotacoes WHERE id=?", (int(cid_edit),))
-                    st.success("Registro excluído.")
-                    st.rerun()
-                else:
-                    st.error("Marque a confirmação antes de excluir.")
+            st.subheader("🗑️ Excluir cotação / orçamento")
+            mats_excl, forns_excl = analisar_itens_exclusivos_cotacao(int(cid_edit))
+
+            with st.container(border=True):
+                st.write("Escolha o que deve ser removido junto com este orçamento:")
+                apagar_mats_puxados = st.checkbox(
+                    f"Apagar também os materiais puxados por este orçamento ({len(mats_excl)} material(is) que não estão em nenhum outro orçamento ou vínculo)",
+                    value=True,
+                    key=f"opt_del_mats_{cid_edit}"
+                )
+                apagar_forns_puxados = st.checkbox(
+                    f"Apagar também os fornecedores puxados por este orçamento ({len(forns_excl)} fornecedor(es) que não estão em nenhum outro orçamento ou vínculo)",
+                    value=True,
+                    key=f"opt_del_forns_{cid_edit}"
+                )
+                confirmar_del_cot = st.checkbox(
+                    "Confirmo a exclusão permanente deste orçamento, seus preços e os arquivos anexados a ele",
+                    key=f"del_cot_{cid_edit}"
+                )
+
+                if st.button("🗑️ Excluir orçamento selecionado", type="primary", key=f"btn_del_cot_{cid_edit}"):
+                    if not confirmar_del_cot:
+                        st.error("Marque a caixa de confirmação antes de excluir.")
+                    else:
+                        remover_anexos_entidade("cotacao", int(cid_edit))
+                        write("DELETE FROM cotacao_itens WHERE cotacao_id=?", (int(cid_edit),))
+                        write("DELETE FROM cotacoes WHERE id=?", (int(cid_edit),))
+
+                        qtd_mats_rem = 0
+                        if apagar_mats_puxados and mats_excl:
+                            for mid_rem in mats_excl:
+                                remover_anexos_entidade("material", int(mid_rem))
+                                write("DELETE FROM materiais WHERE id=?", (int(mid_rem),))
+                                qtd_mats_rem += 1
+
+                        qtd_forns_rem = 0
+                        if apagar_forns_puxados and forns_excl:
+                            for fid_rem in forns_excl:
+                                remover_anexos_entidade("fornecedor", int(fid_rem))
+                                write("DELETE FROM fornecedores WHERE id=?", (int(fid_rem),))
+                                qtd_forns_rem += 1
+
+                        detalhes_rem = ["orçamento, preços e anexos removidos"]
+                        if qtd_mats_rem > 0:
+                            detalhes_rem.append(f"{qtd_mats_rem} material(is) exclusivo(s) apagado(s)")
+                        if qtd_forns_rem > 0:
+                            detalhes_rem.append(f"{qtd_forns_rem} fornecedor(es) exclusivo(s) apagado(s)")
+
+                        st.session_state["msg_del_cot"] = "Exclusão concluída: " + ", ".join(detalhes_rem) + "."
+                        st.rerun()
 
 
 # ==============================================================================
