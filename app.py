@@ -257,35 +257,67 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
         for c, val in enumerate(row_h)
         if pd.notna(val) and str(val).strip()
     ]
+    amostra_bloco = df_raw.iloc[header_row + 2:min(header_row + 40, len(df_raw))]
+
+    def coluna_eh_texto_fornecedor(col_idx):
+        if col_idx < 0 or col_idx >= df_raw.shape[1]:
+            return False
+        if pd.notna(row_h.iloc[col_idx]) and str(row_h.iloc[col_idx]).strip():
+            return False
+        if pd.notna(row_sub.iloc[col_idx]) and str(row_sub.iloc[col_idx]).strip():
+            return False
+        vals_col = [v for v in amostra_bloco.iloc[:, col_idx].tolist() if pd.notna(v) and str(v).strip()]
+        if not vals_col:
+            return False
+        qtd_num = sum(1 for v in vals_col if parse_numero(v) > 0)
+        qtd_txt = sum(
+            1 for v in vals_col
+            if parse_numero(v) == 0 and not re.match(r"^\d{2,4}[-/]\d{2}[-/]\d{2,4}", str(v).strip())
+        )
+        return qtd_txt > qtd_num
+
     for idx_h_pos, (c_ini, raw_h, nh) in enumerate(headers_nao_vazios):
         if re.match(r"^(fornecedor|cotação|cotacao|proposta|empresa)\s*\d+$", nh):
             c_fim = headers_nao_vazios[idx_h_pos + 1][0] if idx_h_pos + 1 < len(headers_nao_vazios) else len(row_sub)
-            c_nome, c_preco, c_data = None, None, None
+
+            # Verifica se o nome do fornecedor fica 1 coluna antes da ancora (ex.: col L antes de FORNECEDOR 1 em M)
+            nome_a_esquerda = coluna_eh_texto_fornecedor(c_ini - 1)
+            if nome_a_esquerda and (c_fim - 1) > c_ini and coluna_eh_texto_fornecedor(c_fim - 1):
+                c_fim -= 1
+
+            c_nome = (c_ini - 1) if nome_a_esquerda else None
+            c_preco, c_preco_fallback, c_data = None, None, None
+
             for col_i in range(c_ini, c_fim):
                 sv = norm(row_sub.iloc[col_i]) if pd.notna(row_sub.iloc[col_i]) else ""
                 if c_nome is None and any(k in sv for k in ("nome", "fornecedor", "empresa", "razão", "razao")):
                     c_nome = col_i
-                elif c_preco is None and any(k in sv for k in ("cotação", "cotacao", "valor", "preço", "preco", "unit")):
-                    c_preco = col_i
+                elif any(k in sv for k in ("cotação", "cotacao", "valor", "preço", "preco", "unit")):
+                    if c_preco is None:
+                        c_preco = col_i
+                    elif c_preco_fallback is None:
+                        c_preco_fallback = col_i
                 elif c_data is None and "data" in sv:
                     c_data = col_i
 
-            # Se o sub-cabecalho nao tiver rotulos claros, deduz pelas colunas do bloco (texto = fornecedor, numero = preco)
+            # Fallback caso o sub-cabecalho nao tenha rotulos claros
             if c_nome is None or c_preco is None:
-                amostra_bloco = df_raw.iloc[header_row + 2:min(header_row + 40, len(df_raw))]
                 for col_i in range(c_ini, c_fim):
                     vals_col = [v for v in amostra_bloco.iloc[:, col_i].tolist() if pd.notna(v) and str(v).strip()]
                     if not vals_col:
                         continue
                     qtd_num = sum(1 for v in vals_col if parse_numero(v) > 0)
-                    qtd_txt = sum(1 for v in vals_col if parse_numero(v) == 0 and not re.match(r"^\d{2,4}[-/]\d{2}[-/]\d{2,4}", str(v).strip()))
+                    qtd_txt = sum(
+                        1 for v in vals_col
+                        if parse_numero(v) == 0 and not re.match(r"^\d{2,4}[-/]\d{2}[-/]\d{2,4}", str(v).strip())
+                    )
                     if c_nome is None and qtd_txt > qtd_num:
                         c_nome = col_i
                     elif c_preco is None and qtd_num >= qtd_txt and qtd_num > 0:
                         c_preco = col_i
 
             if c_nome is not None and c_preco is not None:
-                forn_blocks.append((c_nome, c_preco, c_data))
+                forn_blocks.append((c_nome, c_preco, c_preco_fallback, c_data))
 
     # 2. Fallback: sub-cabecalho repetido com "Nome" + "Cotacao / Preco / Valor"
     if not forn_blocks:
@@ -294,7 +326,7 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
             s_nxt = norm(row_sub.iloc[c + 1]) if pd.notna(row_sub.iloc[c + 1]) else ""
             if s_cur in ("nome", "fornecedor", "empresa") and any(k in s_nxt for k in ("cotação", "cotacao", "valor", "preço", "preco", "unit")):
                 s_dt = norm(row_sub.iloc[c + 2]) if (c + 2 < len(row_sub) and pd.notna(row_sub.iloc[c + 2])) else ""
-                forn_blocks.append((c, c + 1, c + 2 if "data" in s_dt else None))
+                forn_blocks.append((c, c + 1, None, c + 2 if "data" in s_dt else None))
 
     # 3. Fallback: nome de cada fornecedor direto no cabecalho principal (ex.: coluna "Tupy", coluna "Saint-Gobain")
     forn_header_cols = []
@@ -385,13 +417,16 @@ def detectar_tabela_cotacoes_comparativa(df_raw):
 
         cotacoes_forn = []
         if forn_blocks:
-            for c_nome, c_preco, c_data in forn_blocks:
+            for c_nome, c_preco, c_preco_fb, c_data in forn_blocks:
                 fn = row.iloc[c_nome]
                 fp = row.iloc[c_preco]
+                fp_fb = row.iloc[c_preco_fb] if c_preco_fb is not None else None
                 fd = row.iloc[c_data] if c_data is not None else None
                 fn_s = str(fn).strip() if pd.notna(fn) else ""
-                if fn_s and fn_s not in ("-", "—", "0", "nan", "None") and pd.notna(fp):
-                    p_num = parse_numero(fp)
+                if fn_s and fn_s not in ("-", "—", "0", "nan", "None"):
+                    p_num = parse_numero(fp) if pd.notna(fp) else 0.0
+                    if p_num <= 0 and fp_fb is not None and pd.notna(fp_fb):
+                        p_num = parse_numero(fp_fb)
                     if p_num > 0:
                         dt_str = str(fd)[:10] if pd.notna(fd) else ""
                         cotacoes_forn.append({"fornecedor": fn_s, "preco": p_num, "data": dt_str})
