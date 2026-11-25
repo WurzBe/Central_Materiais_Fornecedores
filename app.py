@@ -75,11 +75,12 @@ def read(sql, params=()):
 
 def write(sql, params=()):
     with db() as c:
-        c.execute(sql, params)
+        cur = c.execute(sql, params)
+        return cur.lastrowid
 
 
 def norm(texto):
-    return " ".join((texto or "").strip().lower().split())
+    return " ".join((str(texto) if texto is not None else "").strip().lower().split())
 
 
 def apenas_digitos(texto):
@@ -92,6 +93,82 @@ def idx_opcao(opcoes, valor):
 
 def fmt_brl(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def parse_numero(val):
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace("R$", "").replace(" ", "").strip()
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def achar_coluna_padrao(colunas, palavras_chave):
+    for idx, col in enumerate(colunas):
+        c_norm = norm(col)
+        for p in palavras_chave:
+            if p in c_norm:
+                return idx
+    return 0
+
+
+def obter_ou_criar_material(descricao, dn="", fabricante=""):
+    desc_limpa = str(descricao).strip()
+    dn_limpo = str(dn).strip() if pd.notna(dn) else ""
+    fab_limpo = str(fabricante).strip() if pd.notna(fabricante) else ""
+
+    existentes = read("SELECT id, descricao, dn, fabricante FROM materiais")
+    if not existentes.empty:
+        match = existentes[
+            existentes.apply(
+                lambda r: norm(r["descricao"]) == norm(desc_limpa)
+                and norm(r["dn"]) == norm(dn_limpo),
+                axis=1
+            )
+        ]
+        if not match.empty:
+            return int(match.iloc[0]["id"]), False
+
+    novo_id = write(
+        """INSERT INTO materiais(descricao, dn, fabricante, status)
+           VALUES(?, ?, ?, 'Em revisão')""",
+        (desc_limpa, dn_limpo, fab_limpo)
+    )
+    return int(novo_id), True
+
+
+def obter_ou_criar_fornecedor(nome_fornecedor):
+    nome_limpo = str(nome_fornecedor).strip()
+    if not nome_limpo:
+        nome_limpo = "Fornecedor Não Especificado"
+    existentes = read("SELECT id, razao_social, nome_fantasia FROM fornecedores")
+    if not existentes.empty:
+        match = existentes[
+            existentes.apply(
+                lambda r: norm(r["razao_social"]) == norm(nome_limpo)
+                or (r["nome_fantasia"] and norm(r["nome_fantasia"]) == norm(nome_limpo)),
+                axis=1
+            )
+        ]
+        if not match.empty:
+            return int(match.iloc[0]["id"]), False
+
+    novo_id = write(
+        "INSERT INTO fornecedores(razao_social) VALUES(?)",
+        (nome_limpo,)
+    )
+    return int(novo_id), True
 
 
 def salvar_arquivo_anexo(arquivo, entidade_tipo, entidade_id, tipo_documento, observacoes="", fornecedor_id=None):
@@ -284,7 +361,7 @@ if menu == "🔍 Pesquisa & Catálogo":
     st.caption(f"Exibindo **{len(rows)}** material(is) encontrado(s)")
 
     if rows.empty:
-        st.info("Nenhum material encontrado com esses filtros. Cadastre novos itens em 'Materiais & Fornecedores'.")
+        st.info("Nenhum material encontrado com esses filtros. Cadastre novos itens ou importe um orçamento pronto.")
 
     for _, m in rows.iterrows():
         badge_status = "🟢" if m.status == "Validado" else ("🟡" if m.status == "Em revisão" else "⚪")
@@ -357,18 +434,18 @@ if menu == "🔍 Pesquisa & Catálogo":
                         cot_ids
                     )
                     if not anexos_orc.empty:
-                        st.markdown("**Orçamentos / Propostas das cotações acima**")
+                        st.markdown("**Planilhas e propostas das cotações acima**")
                         for _, ax_o in anexos_orc.iterrows():
                             caminho_o = ANEXOS_DIR / ax_o["arquivo_salvo"]
                             c_o1, c_o2 = st.columns([4, 1])
                             forn_txt = f" | Fornecedor: **{ax_o['fornecedor_nome']}**" if ax_o["fornecedor_nome"] else ""
                             proc_txt = ax_o["processo"] or f"Cotação #{ax_o['entidade_id']}"
                             c_o1.write(
-                                f"📎 **{ax_o['nome_original']}** — Processo: {proc_txt}{forn_txt} ({ax_o['data_upload'] or ''})"
+                                f"📎 **{ax_o['nome_original']}** — {proc_txt}{forn_txt} ({ax_o['data_upload'] or ''})"
                             )
                             if caminho_o.exists():
                                 c_o2.download_button(
-                                    "Baixar orçamento",
+                                    "Baixar arquivo",
                                     data=caminho_o.read_bytes(),
                                     file_name=ax_o["nome_original"],
                                     key=f"dl_orc_mat_{m.id}_{ax_o['id']}"
@@ -780,14 +857,191 @@ elif menu == "📦 Materiais & Fornecedores":
 # ==============================================================================
 elif menu == "💰 Cotações & Preços":
     st.title("Cotações & Histórico de Preços")
-    st.caption("Gerencie processos de cotação, lance propostas por fornecedor e anexe os orçamentos.")
+    st.caption("Importe planilhas de orçamento prontas ou gerencie processos de cotação manualmente.")
 
-    aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
-        "📋 Cadastrar cotação",
-        "💲 Itens, preços & Orçamentos",
+    aba_import, aba_cot_lista, aba_cot_itens, aba_cot_editar = st.tabs([
+        "📥 Importar Planilha Pronta",
+        "📋 Cadastrar cotação manual",
+        "💲 Itens e preços",
         "✏️ Editar ou excluir"
     ])
 
+    # --- NOVA ABA: IMPORTAÇÃO AUTOMÁTICA + ARQUIVO ---
+    with aba_import:
+        st.subheader("Importar orçamento pronto (Excel ou CSV)")
+        st.write(
+            "Envie uma planilha de orçamento pronta. O sistema **arquiva o documento original** "
+            "e **cadastra automaticamente os materiais e preços** para consulta na Pesquisa."
+        )
+
+        arq_planilha = st.file_uploader(
+            "Selecione a planilha de orçamento (.xlsx, .xls ou .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="up_planilha_pronta"
+        )
+
+        if arq_planilha is not None:
+            try:
+                if arq_planilha.name.lower().endswith(".csv"):
+                    try:
+                        df_raw = pd.read_csv(arq_planilha, sep=None, engine="python")
+                    except Exception:
+                        arq_planilha.seek(0)
+                        df_raw = pd.read_csv(arq_planilha, sep=";", encoding="latin1")
+                else:
+                    excel_file = pd.ExcelFile(arq_planilha)
+                    aba_escolhida = excel_file.sheet_names[0]
+                    if len(excel_file.sheet_names) > 1:
+                        aba_escolhida = st.selectbox("Selecione a aba da planilha", excel_file.sheet_names)
+                    df_raw = pd.read_excel(excel_file, sheet_name=aba_escolhida)
+
+                df_raw = df_raw.dropna(how="all").reset_index(drop=True)
+                df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+                if df_raw.empty or len(df_raw.columns) == 0:
+                    st.error("A planilha selecionada está vazia.")
+                else:
+                    st.markdown("**Prévia dos dados encontrados na planilha:**")
+                    st.dataframe(df_raw.head(8), use_container_width=True, hide_index=True)
+
+                    cols_plan = list(df_raw.columns)
+                    cols_opc = ["(Não tem na planilha)"] + cols_plan
+
+                    st.markdown("**1. Dados gerais do orçamento**")
+                    g1, g2, g3 = st.columns([1.5, 1, 1.5])
+                    nome_orc = g1.text_input("Identificação do orçamento *", value=Path(arq_planilha.name).stem)
+                    data_orc = g2.date_input("Data do orçamento", value=date.today())
+                    forn_padrao = g3.text_input(
+                        "Fornecedor padrão (usado se não houver coluna de fornecedor)",
+                        placeholder="Ex.: Tubos & Conexões Ltda"
+                    )
+
+                    st.markdown("**2. Mapeamento das colunas da planilha**")
+                    m1, m2, m3 = st.columns(3)
+                    col_desc = m1.selectbox(
+                        "Coluna da Descrição / Material *",
+                        cols_plan,
+                        index=achar_coluna_padrao(cols_plan, ["descr", "material", "item", "produto", "espec"])
+                    )
+                    col_preco = m2.selectbox(
+                        "Coluna do Preço Unitário *",
+                        cols_plan,
+                        index=achar_coluna_padrao(cols_plan, ["unit", "preco", "preço", "valor", "vlr"])
+                    )
+                    col_qtd = m3.selectbox(
+                        "Coluna da Quantidade",
+                        cols_opc,
+                        index=achar_coluna_padrao(cols_opc, ["qtd", "quant", "qtde"])
+                    )
+
+                    m4, m5, m6 = st.columns(3)
+                    col_unid = m4.selectbox(
+                        "Coluna da Unidade",
+                        cols_opc,
+                        index=achar_coluna_padrao(cols_opc, ["unid", "und", "un"])
+                    )
+                    col_forn = m5.selectbox(
+                        "Coluna do Fornecedor (se houver)",
+                        cols_opc,
+                        index=achar_coluna_padrao(cols_opc, ["forn", "empresa", "fornecedor"])
+                    )
+                    col_dn = m6.selectbox(
+                        "Coluna de DN / Bitola (opcional)",
+                        cols_opc,
+                        index=achar_coluna_padrao(cols_opc, ["dn", "diam", "bitola"])
+                    )
+
+                    if st.button("🚀 Arquivar planilha e importar itens para o catálogo", type="primary"):
+                        if not nome_orc.strip():
+                            st.error("Informe uma identificação para o orçamento.")
+                        else:
+                            cid_novo = write(
+                                """INSERT INTO cotacoes(processo, data_cotacao, objeto, status, observacoes)
+                                   VALUES(?, ?, ?, 'Concluída', ?)""",
+                                (
+                                    nome_orc.strip(),
+                                    str(data_orc),
+                                    f"Importado de {arq_planilha.name}",
+                                    "Importação automática de planilha pronta"
+                                )
+                            )
+
+                            fid_default = None
+                            if forn_padrao.strip():
+                                fid_default, _ = obter_ou_criar_fornecedor(forn_padrao.strip())
+
+                            arq_planilha.seek(0)
+                            salvar_arquivo_anexo(
+                                arq_planilha,
+                                entidade_tipo="cotacao",
+                                entidade_id=int(cid_novo),
+                                tipo_documento="Proposta comercial / Orçamento",
+                                observacoes="Planilha original importada",
+                                fornecedor_id=fid_default
+                            )
+
+                            qtd_importados = 0
+                            qtd_mat_novos = 0
+
+                            for _, linha in df_raw.iterrows():
+                                desc_val = linha.get(col_desc)
+                                if pd.isna(desc_val) or not str(desc_val).strip():
+                                    continue
+                                if norm(desc_val) in ["total", "subtotal", "total geral", "valor total"]:
+                                    continue
+
+                                preco_val = parse_numero(linha.get(col_preco))
+                                if preco_val <= 0:
+                                    continue
+
+                                qtd_val = parse_numero(linha.get(col_qtd)) if col_qtd != "(Não tem na planilha)" else 1.0
+                                if qtd_val <= 0:
+                                    qtd_val = 1.0
+
+                                unid_val = str(linha.get(col_unid)).strip() if (col_unid != "(Não tem na planilha)" and pd.notna(linha.get(col_unid))) else "un"
+                                dn_val = str(linha.get(col_dn)).strip() if (col_dn != "(Não tem na planilha)" and pd.notna(linha.get(col_dn))) else ""
+
+                                if col_forn != "(Não tem na planilha)" and pd.notna(linha.get(col_forn)) and str(linha.get(col_forn)).strip():
+                                    fid_linha, _ = obter_ou_criar_fornecedor(str(linha.get(col_forn)).strip())
+                                elif fid_default is not None:
+                                    fid_linha = fid_default
+                                else:
+                                    fid_linha, _ = obter_ou_criar_fornecedor("Fornecedor Não Especificado")
+
+                                mid_linha, eh_novo = obter_ou_criar_material(str(desc_val).strip(), dn=dn_val)
+                                if eh_novo:
+                                    qtd_mat_novos += 1
+
+                                write(
+                                    """INSERT INTO cotacao_itens
+                                       (cotacao_id, material_id, fornecedor_id, quantidade, unidade, preco_unitario, observacoes)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                    (
+                                        int(cid_novo),
+                                        int(mid_linha),
+                                        int(fid_linha),
+                                        float(qtd_val),
+                                        unid_val or "un",
+                                        float(preco_val),
+                                        f"Importado de {arq_planilha.name}"
+                                    )
+                                )
+                                qtd_importados += 1
+
+                            if qtd_importados == 0:
+                                st.warning(
+                                    "A planilha foi arquivada, mas nenhuma linha com descrição e preço maior que zero "
+                                    "foi importada. Verifique se selecionou as colunas corretas."
+                                )
+                            else:
+                                st.success(
+                                    f"Concluído! {qtd_importados} item(ns) de preço importados "
+                                    f"({qtd_mat_novos} material(is) novo(s) cadastrado(s)) e planilha arquivada."
+                                )
+            except Exception as erro:
+                st.error(f"Não foi possível ler a planilha: {erro}")
+
+    # --- ABA: CADASTRAR COTAÇÃO MANUAL ---
     with aba_cot_lista:
         with st.form("cot"):
             a, b = st.columns(2)
@@ -808,6 +1062,7 @@ elif menu == "💰 Cotações & Preços":
         df_cots_reg = read("SELECT * FROM cotacoes ORDER BY data_cotacao DESC, id DESC")
         st.dataframe(df_cots_reg, use_container_width=True, hide_index=True)
 
+    # --- ABA: ITENS E PREÇOS ---
     with aba_cot_itens:
         cots = read("SELECT id, processo, data_cotacao, objeto, status FROM cotacoes ORDER BY data_cotacao DESC, id DESC")
         ms = read("SELECT id, descricao, dn, fabricante FROM materiais ORDER BY descricao")
@@ -827,11 +1082,11 @@ elif menu == "💰 Cotações & Preços":
             return f"{row['descricao']} (DN {dn_txt} | {fab_txt})"
 
         if cots.empty:
-            st.info("Crie uma cotação na aba 'Cadastrar cotação' antes de lançar itens e preços.")
+            st.info("Importe uma planilha na primeira aba ou crie uma cotação manual antes de lançar itens.")
         elif ms.empty or fs.empty:
-            st.info("Cadastre ao menos um material e um fornecedor para lançar preços.")
+            st.info("Cadastre ao menos um material e um fornecedor para lançar preços manualmente.")
         else:
-            cid = st.selectbox("Selecione a cotação", cots["id"].tolist(), format_func=label_cotacao)
+            cid = st.selectbox("Selecione a cotação / orçamento", cots["id"].tolist(), format_func=label_cotacao)
 
             with st.form("form_item_cotacao"):
                 col1, col2 = st.columns(2)
@@ -877,10 +1132,10 @@ elif menu == "💰 Cotações & Preços":
                             observacoes=obs_item.strip(),
                             fornecedor_id=int(fid_c)
                         )
-                    st.success("Item e preço adicionados à cotação.")
+                    st.success("Item e preço adicionados.")
                     st.rerun()
 
-            st.subheader("Itens lançados nesta cotação")
+            st.subheader("Itens lançados neste orçamento")
             itens_cot = read(
                 """SELECT ci.id, m.descricao AS Material, m.dn AS DN, f.razao_social AS Fornecedor,
                           ci.quantidade AS Qtd, ci.unidade AS Unid,
@@ -918,39 +1173,7 @@ elif menu == "💰 Cotações & Preços":
                     st.rerun()
 
             st.divider()
-            st.subheader("📎 Orçamentos e propostas anexados a esta cotação")
-
-            with st.expander("➕ Anexar proposta comercial / orçamento avulso nesta cotação"):
-                with st.form("form_anexo_direto_cot"):
-                    opcoes_forn_ax = [0] + fs["id"].tolist()
-
-                    def label_forn_ax(i):
-                        if i == 0:
-                            return "Geral da cotação (sem fornecedor específico)"
-                        return fs.loc[fs["id"] == i, "razao_social"].iloc[0]
-
-                    col_ax1, col_ax2 = st.columns(2)
-                    fid_ax = col_ax1.selectbox("Fornecedor do orçamento", opcoes_forn_ax, format_func=label_forn_ax)
-                    tipo_ax_cot = col_ax2.selectbox("Tipo de arquivo", TIPOS_DOC)
-                    arq_cot_avulso = st.file_uploader("Selecione o arquivo do orçamento", type=EXTENSOES_ACEITAS)
-                    obs_ax_cot = st.text_input("Observações (ex.: Proposta nº 123, validade 10 dias)")
-                    btn_ax_cot = st.form_submit_button("Salvar orçamento na cotação")
-
-                if btn_ax_cot:
-                    if arq_cot_avulso is None:
-                        st.error("Selecione um arquivo antes de salvar.")
-                    else:
-                        salvar_arquivo_anexo(
-                            arq_cot_avulso,
-                            entidade_tipo="cotacao",
-                            entidade_id=int(cid),
-                            tipo_documento=tipo_ax_cot,
-                            observacoes=obs_ax_cot,
-                            fornecedor_id=int(fid_ax) if fid_ax != 0 else None
-                        )
-                        st.success("Orçamento anexado à cotação!")
-                        st.rerun()
-
+            st.subheader("📎 Arquivos e planilhas vinculados")
             anexos_desta_cot = read(
                 """SELECT a.id, a.tipo_documento, a.nome_original, a.arquivo_salvo,
                           a.data_upload, a.observacoes, f.razao_social AS fornecedor_nome
@@ -960,9 +1183,8 @@ elif menu == "💰 Cotações & Preços":
                    ORDER BY a.id DESC""",
                 (int(cid),)
             )
-
             if anexos_desta_cot.empty:
-                st.caption("Nenhum arquivo de orçamento anexado a esta cotação ainda.")
+                st.caption("Nenhum arquivo anexado a este orçamento.")
             else:
                 for _, ax_c in anexos_desta_cot.iterrows():
                     caminho_c = ANEXOS_DIR / ax_c["arquivo_salvo"]
@@ -981,14 +1203,13 @@ elif menu == "💰 Cotações & Preços":
                                 file_name=ax_c["nome_original"],
                                 key=f"dl_cot_inline_{ax_c['id']}"
                             )
-                        else:
-                            c_a2.caption("Ausente")
                         if c_a3.button("Excluir", key=f"del_cot_inline_{ax_c['id']}"):
                             if caminho_c.exists():
                                 caminho_c.unlink()
                             write("DELETE FROM anexos WHERE id=?", (int(ax_c["id"]),))
                             st.rerun()
 
+    # --- ABA: EDITAR OU EXCLUIR ---
     with aba_cot_editar:
         cots_ed = read("SELECT * FROM cotacoes ORDER BY id DESC")
         if cots_ed.empty:
@@ -1029,7 +1250,7 @@ elif menu == "💰 Cotações & Preços":
                 st.rerun()
 
             st.divider()
-            st.subheader("Excluir cotação")
+            st.subheader("Excluir cotação / orçamento")
             qtd_itens_c = read(
                 "SELECT COUNT(*) AS total FROM cotacao_itens WHERE cotacao_id=?",
                 (int(cid_edit),)
@@ -1039,20 +1260,20 @@ elif menu == "💰 Cotações & Preços":
                 (int(cid_edit),)
             )["total"].iloc[0]
             if qtd_itens_c > 0 or qtd_ax_c > 0:
-                st.warning(f"Esta cotação possui {qtd_itens_c} item(ns) de preço e {qtd_ax_c} anexo(s) vinculado(s).")
+                st.warning(f"Este registro possui {qtd_itens_c} item(ns) de preço e {qtd_ax_c} anexo(s) vinculado(s).")
 
             confirmar_del_cot = st.checkbox(
-                "Confirmo que desejo excluir permanentemente esta cotação (e seus itens/anexos)",
+                "Confirmo que desejo excluir permanentemente este registro (e seus itens/anexos)",
                 key=f"del_cot_{cid_edit}"
             )
-            if st.button("Excluir cotação selecionada", type="primary"):
+            if st.button("Excluir registro selecionado", type="primary"):
                 if not confirmar_del_cot:
                     st.error("Marque a caixa de confirmação antes de excluir.")
                 else:
                     remover_anexos_entidade("cotacao", int(cid_edit))
                     write("DELETE FROM cotacao_itens WHERE cotacao_id=?", (int(cid_edit),))
                     write("DELETE FROM cotacoes WHERE id=?", (int(cid_edit),))
-                    st.success("Cotação excluída.")
+                    st.success("Registro excluído.")
                     st.rerun()
 
 
@@ -1121,7 +1342,7 @@ else:
                     proc_s = ax["cot_proc"] or f"ID {ax['entidade_id']}"
                     obj_s = f" ({ax['cot_obj']})" if ax["cot_obj"] else ""
                     forn_s = f" • Fornecedor: {ax['forn_orc_nome']}" if ax["forn_orc_nome"] else ""
-                    vinculo_txt = f"Cotação: {proc_s}{obj_s}{forn_s}"
+                    vinculo_txt = f"Orçamento/Cotação: {proc_s}{obj_s}{forn_s}"
                 else:
                     vinculo_txt = f"Fornecedor: {ax['forn_ent_nome'] or 'ID ' + str(ax['entidade_id'])}"
 
