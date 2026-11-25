@@ -1,9 +1,13 @@
 import sqlite3
+import uuid
+from datetime import date
 from pathlib import Path
 import streamlit as st
 import pandas as pd
 
 DB = Path(__file__).with_name("central.db")
+ANEXOS_DIR = Path(__file__).with_name("anexos")
+ANEXOS_DIR.mkdir(exist_ok=True)
 
 
 def db():
@@ -46,6 +50,16 @@ def init():
           FOREIGN KEY(material_id) REFERENCES materiais(id),
           FOREIGN KEY(fornecedor_id) REFERENCES fornecedores(id)
         );
+        CREATE TABLE IF NOT EXISTS anexos (
+          id INTEGER PRIMARY KEY,
+          entidade_tipo TEXT NOT NULL,
+          entidade_id INTEGER NOT NULL,
+          tipo_documento TEXT,
+          nome_original TEXT NOT NULL,
+          arquivo_salvo TEXT NOT NULL,
+          data_upload TEXT,
+          observacoes TEXT
+        );
         """)
 
 
@@ -75,6 +89,21 @@ def fmt_brl(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def remover_anexos_entidade(entidade_tipo, entidade_id):
+    df_a = read(
+        "SELECT id, arquivo_salvo FROM anexos WHERE entidade_tipo=? AND entidade_id=?",
+        (entidade_tipo, int(entidade_id))
+    )
+    for _, r in df_a.iterrows():
+        arq = ANEXOS_DIR / r["arquivo_salvo"]
+        if arq.exists():
+            arq.unlink()
+    write(
+        "DELETE FROM anexos WHERE entidade_tipo=? AND entidade_id=?",
+        (entidade_tipo, int(entidade_id))
+    )
+
+
 CATEGORIAS = [
     "", "Tubos", "Conexões", "Válvulas", "Atuadores",
     "Medidores", "Bombas", "Materiais elétricos", "Instrumentação", "Outros"
@@ -87,18 +116,22 @@ CONEXOES = ["", "Flangeada", "Ponta e bolsa", "Roscada", "Soldável", "Wafer", "
 ACIONAMENTOS = ["", "Manual", "Elétrico", "Pneumático", "Hidráulico", "Sem acionamento"]
 APLICACOES = ["", "Água potável", "Esgoto", "Drenagem", "Industrial", "Outra"]
 STATUS_MAT = ["Em revisão", "Validado", "Inativo"]
+TIPOS_DOC = [
+    "Ficha técnica", "Catálogo", "Proposta comercial",
+    "Desenho técnico", "Certificado / Norma", "Outro"
+]
 
 st.set_page_config(page_title="Central de Materiais e Fornecedores", page_icon="🧰", layout="wide")
 init()
 st.title("Central de Materiais e Fornecedores")
-st.caption("Protótipo local • banco de dados armazenado em central.db neste computador")
+st.caption("Protótipo local • banco central.db e arquivos na pasta anexos/")
 
 paginas = [
     "Pesquisa", "Cadastrar material", "Fornecedores",
-    "Relacionar fornecedor", "Cotações", "Exportar"
+    "Relacionar fornecedor", "Cotações", "Anexos", "Exportar"
 ]
 page = st.sidebar.radio("Navegação", paginas)
-st.sidebar.info("Versão inicial para testes locais. Não é multiusuário.")
+st.sidebar.info("Versão local (custo zero). Para backup completo, copie central.db e a pasta anexos/.")
 
 if page == "Pesquisa":
     st.header("Pesquisar materiais")
@@ -178,6 +211,32 @@ if page == "Pesquisa":
                 st.dataframe(hist_cot, use_container_width=True, hide_index=True)
             else:
                 st.caption("Sem cotações registradas para este material.")
+
+            anexos_mat = read(
+                "SELECT id, tipo_documento, nome_original, arquivo_salvo, data_upload, observacoes "
+                "FROM anexos WHERE entidade_tipo='material' AND entidade_id=? ORDER BY id DESC",
+                (int(m.id),)
+            )
+            st.markdown("**Documentos e fichas técnicas anexadas**")
+            if anexos_mat.empty:
+                st.caption("Nenhum arquivo anexado a este material.")
+            else:
+                for _, ax in anexos_mat.iterrows():
+                    caminho = ANEXOS_DIR / ax["arquivo_salvo"]
+                    col_a, col_b = st.columns([4, 1])
+                    info_ax = f"**{ax['tipo_documento']}:** {ax['nome_original']} ({ax['data_upload'] or ''})"
+                    if ax["observacoes"]:
+                        info_ax += f" — _{ax['observacoes']}_"
+                    col_a.write(info_ax)
+                    if caminho.exists():
+                        col_b.download_button(
+                            "Baixar",
+                            data=caminho.read_bytes(),
+                            file_name=ax["nome_original"],
+                            key=f"dl_pesq_mat_{ax['id']}"
+                        )
+                    else:
+                        col_b.caption("Arquivo ausente")
 
 elif page == "Cadastrar material":
     st.header("Materiais")
@@ -343,6 +402,7 @@ elif page == "Cadastrar material":
                 if not confirmar_del_mat:
                     st.error("Marque a caixa de confirmação antes de excluir.")
                 else:
+                    remover_anexos_entidade("material", int(mid_edit))
                     write("DELETE FROM cotacao_itens WHERE material_id=?", (int(mid_edit),))
                     write("DELETE FROM fornecimentos WHERE material_id=?", (int(mid_edit),))
                     write("DELETE FROM materiais WHERE id=?", (int(mid_edit),))
@@ -481,6 +541,7 @@ elif page == "Fornecedores":
                 if not confirmar_del_forn:
                     st.error("Marque a caixa de confirmação antes de excluir.")
                 else:
+                    remover_anexos_entidade("fornecedor", int(fid_edit))
                     write("DELETE FROM cotacao_itens WHERE fornecedor_id=?", (int(fid_edit),))
                     write("DELETE FROM fornecimentos WHERE fornecedor_id=?", (int(fid_edit),))
                     write("DELETE FROM fornecedores WHERE id=?", (int(fid_edit),))
@@ -639,10 +700,124 @@ elif page == "Cotações":
                     st.success("Item removido.")
                     st.rerun()
 
+elif page == "Anexos":
+    st.header("Anexos: Propostas, Catálogos e Fichas Técnicas")
+    st.caption(f"Arquivos armazenados localmente em: {ANEXOS_DIR}")
+
+    aba_up, aba_lista = st.tabs(["Enviar novo arquivo", "Consultar e baixar anexos"])
+
+    with aba_up:
+        tipo_entidade = st.selectbox(
+            "Vincular arquivo a:",
+            ["material", "cotacao", "fornecedor"],
+            format_func=lambda t: {
+                "material": "Material (ficha técnica / catálogo)",
+                "cotacao": "Cotação (proposta comercial)",
+                "fornecedor": "Fornecedor (portfólio / certificado)"
+            }[t]
+        )
+
+        opcoes_ids = []
+        mapa_labels = {}
+
+        if tipo_entidade == "material":
+            df_e = read("SELECT id, descricao, dn, fabricante FROM materiais ORDER BY descricao")
+            for _, r in df_e.iterrows():
+                opcoes_ids.append(int(r["id"]))
+                mapa_labels[int(r["id"])] = f"ID {r['id']} — {r['descricao']} (DN {r['dn'] or '—'})"
+        elif tipo_entidade == "cotacao":
+            df_e = read("SELECT id, processo, objeto, data_cotacao FROM cotacoes ORDER BY data_cotacao DESC, id DESC")
+            for _, r in df_e.iterrows():
+                opcoes_ids.append(int(r["id"]))
+                mapa_labels[int(r["id"])] = f"ID {r['id']} | {r['processo'] or 'Sem nº'} — {r['objeto'] or 'Sem objeto'}"
+        else:
+            df_e = read("SELECT id, razao_social, cnpj FROM fornecedores ORDER BY razao_social")
+            for _, r in df_e.iterrows():
+                opcoes_ids.append(int(r["id"]))
+                mapa_labels[int(r["id"])] = f"ID {r['id']} — {r['razao_social']}"
+
+        if not opcoes_ids:
+            st.info("Cadastre primeiro um registro desse tipo antes de anexar arquivos.")
+        else:
+            with st.form("form_upload_anexo"):
+                ent_id = st.selectbox("Selecione o registro *", opcoes_ids, format_func=lambda i: mapa_labels[i])
+                tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC)
+                arquivo = st.file_uploader(
+                    "Escolha o arquivo (PDF, imagem, Excel, Word, etc.)",
+                    type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc", "csv", "txt"]
+                )
+                obs_ax = st.text_input("Observações sobre o arquivo")
+                enviar_ax = st.form_submit_button("Salvar anexo")
+
+            if enviar_ax:
+                if arquivo is None:
+                    st.error("Selecione um arquivo antes de salvar.")
+                else:
+                    ext = Path(arquivo.name).suffix.lower()
+                    nome_unico = f"{tipo_entidade}_{ent_id}_{uuid.uuid4().hex[:8]}{ext}"
+                    destino = ANEXOS_DIR / nome_unico
+                    destino.write_bytes(arquivo.getbuffer())
+                    write(
+                        """INSERT INTO anexos(
+                           entidade_tipo, entidade_id, tipo_documento,
+                           nome_original, arquivo_salvo, data_upload, observacoes)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            tipo_entidade, int(ent_id), tipo_doc,
+                            arquivo.name, nome_unico, str(date.today()), obs_ax.strip()
+                        )
+                    )
+                    st.success(f"Arquivo '{arquivo.name}' salvo com sucesso.")
+                    st.rerun()
+
+    with aba_lista:
+        filtro_t = st.selectbox(
+            "Filtrar por vínculo",
+            ["Todos", "material", "cotacao", "fornecedor"],
+            format_func=lambda t: {
+                "Todos": "Todos os anexos",
+                "material": "Materiais",
+                "cotacao": "Cotações",
+                "fornecedor": "Fornecedores"
+            }[t]
+        )
+        if filtro_t == "Todos":
+            df_ax = read("SELECT * FROM anexos ORDER BY id DESC")
+        else:
+            df_ax = read("SELECT * FROM anexos WHERE entidade_tipo=? ORDER BY id DESC", (filtro_t,))
+
+        if df_ax.empty:
+            st.info("Nenhum arquivo anexado encontrado.")
+        else:
+            for _, ax in df_ax.iterrows():
+                caminho = ANEXOS_DIR / ax["arquivo_salvo"]
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([4, 1, 1])
+                    c1.write(
+                        f"**[{ax['entidade_tipo'].upper()} ID {ax['entidade_id']}]** "
+                        f"{ax['tipo_documento']} — **{ax['nome_original']}** ({ax['data_upload'] or ''})"
+                    )
+                    if ax["observacoes"]:
+                        c1.caption(ax["observacoes"])
+                    if caminho.exists():
+                        c2.download_button(
+                            "Baixar",
+                            data=caminho.read_bytes(),
+                            file_name=ax["nome_original"],
+                            key=f"dl_tab_ax_{ax['id']}"
+                        )
+                    else:
+                        c2.caption("Ausente")
+                    if c3.button("Excluir", key=f"del_tab_ax_{ax['id']}"):
+                        if caminho.exists():
+                            caminho.unlink()
+                        write("DELETE FROM anexos WHERE id=?", (int(ax["id"]),))
+                        st.rerun()
+
 else:
     st.header("Exportar dados")
-    st.write("Exporte cópias CSV das tabelas. Para backup integral, copie o arquivo central.db com o aplicativo fechado.")
-    for table in ["materiais", "fornecedores", "fornecimentos", "cotacoes", "cotacao_itens"]:
+    st.write("Exporte cópias CSV das tabelas. Para backup integral, copie o arquivo central.db e a pasta anexos/ com o aplicativo fechado.")
+    for table in ["materiais", "fornecedores", "fornecimentos", "cotacoes", "cotacao_itens", "anexos"]:
         data = read(f"SELECT * FROM {table}")
         st.download_button(
             f"Baixar {table}.csv",
